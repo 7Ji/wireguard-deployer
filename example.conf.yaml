@@ -1,0 +1,15 @@
+# This is an example config
+psk: true
+# Name of .netdev, without suffix
+netdev: 30-wireguard
+# Name of the interface
+iface: wg0
+# Name of .network, with or without suffix
+network: 40-wireguard
+peers:
+  siteA:
+    ip: 192.168.77.2/24
+    forward: 
+      - 192.168.7.0/24
+  siteB:
+    ip: 192.168.77.3/24
