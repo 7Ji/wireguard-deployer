@@ -1,94 +1,266 @@
-use std::{collections::{BTreeMap, HashMap}, fs::{create_dir, create_dir_all, remove_dir_all, File}, io::{Read, Write}, mem::MaybeUninit, net::IpAddr, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
+use std::{borrow::Cow, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir, create_dir_all, remove_dir_all, File}, io::{Read, Write}, mem::MaybeUninit, net::IpAddr, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
 use base64::Engine;
 use rand::RngCore;
-use serde::Deserialize;
-use ipnet::IpNet;
+use serde::{de::DeserializeOwned, Deserialize};
 
-const WIREGUARD_KEY_LENGTH: usize = 32;
-const WIREGUARD_KEY_BASE64_LENGTH: usize = 44;
+const LEN_CURVE25519_KEY_RAW: usize = 32;
+const LEN_CURVE25519_KEY_BASE64: usize = 44;
 
-struct WireGuardKey {
-    value: [u8; WIREGUARD_KEY_LENGTH]
+#[derive(Debug)]
+enum Error {
+    ArgumentNotRight,
+    Base64EncodeBufferTooSmall,
+    Base64LengthIncorrect {
+        expected: usize, actual: usize
+    },
+    IoError (String),
+    YAMLError (String),
 }
+
+impl From<base64::EncodeSliceError> for Error {
+    fn from(_: base64::EncodeSliceError) -> Self {
+        Self::Base64EncodeBufferTooSmall
+    }
+}
+
+#[inline(always)]
+fn string_from_display<D: Display>(display: D) -> String {
+    format!("{}", display)
+}
+
+macro_rules! impl_from_error_display {
+    ($external: ty, $internal: ident) => {
+        impl From<$external> for Error {
+            fn from(value: $external) -> Self {
+                Self::$internal(string_from_display(value))
+            }
+        }
+    };
+}
+
+impl_from_error_display!(std::io::Error, IoError);
+impl_from_error_display!(serde_yaml::Error, YAMLError);
+
+type Result<T> = std::result::Result<T, Error>;
+
+fn file_create_checked<P: AsRef<Path>>(path: P) -> Result<File> {
+    File::create(&path).map_err(|e|{
+        eprintln!("Failed to create file at '{}': {}", 
+                    path.as_ref().display(), e);
+        e.into()
+    })
+}
+
+fn write_all_checked<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
+    writer.write_all(data).map_err(|e|{
+        eprintln!("Failed to write {} bytes to file: {}", data.len(), e);
+        e.into()
+    })
+}
+
+fn file_open_checked<P: AsRef<Path>>(path: P) -> Result<File> {
+    File::open(&path).map_err(|e|{
+        eprintln!("Failed to open file at '{}': {}", 
+                    path.as_ref().display(), e);
+        e.into()
+    })
+}
+
+fn read_exact_checked<R: Read>(reader: &mut R, data: &mut [u8]) -> Result<()> {
+    reader.read_exact(data).map_err(|e|{
+        eprintln!("Failed to read {} bytes from file: {}", data.len(), e);
+        e.into()
+    })
+}
+
+fn content_to_file<P: AsRef<Path>>(content: &[u8], path: P) -> Result<()> {
+    write_all_checked(&mut file_create_checked(path)?, content)
+}
+
+// pub fn from_reader<R, T>(rdr: R) -> Result<T>
+// where
+//     R: io::Read,
+//     T: DeserializeOwned,
+fn yaml_from_reader_checked<T, R>(reader: &mut R) -> Result<T> 
+where
+    T: DeserializeOwned,
+    R: Read
+{
+    serde_yaml::from_reader(reader).into()
+}
+
+/// A raw WireGuard key, users shall not use this, but `WireGuardKey` instead
+type WireGuardKeyRaw = [u8; WireGuardKey::LEN_RAW];
+/// A base64-encoded WireGuard key
+type WireGuardKeyBase64 = [u8; WireGuardKey::LEN_BASE64];
+
+/// A WireGuard-compatible key, does not differentiate public or private by 
+/// itself, user should take care of that
+#[derive(Default)]
+struct WireGuardKey {
+    value: WireGuardKeyRaw
+}
+
 
 impl WireGuardKey {
+    /// The length of a WireGuard key, raw byte length
+    const LEN_RAW: usize = LEN_CURVE25519_KEY_RAW;
+    /// The length of a WireGuard key, base64 encoded length
+    const LEN_BASE64: usize = LEN_CURVE25519_KEY_BASE64;
+
+    /// The base64 engine we use, chars `0-9` `a-z` `A-Z` `/` `+`, with padding
+    const BASE64_ENGINE: base64::engine::GeneralPurpose 
+        = base64::engine::general_purpose::STANDARD;
+
+    fn new_empty_raw() -> WireGuardKeyRaw {
+        [0; Self::LEN_RAW]
+    }
+
+    fn new_empty_base64() -> WireGuardKeyBase64 {
+        [0; Self::LEN_BASE64]
+    }
+
+    /// Create a new random `WireGuardKey` with a `rand::Rng`-compatible 
+    /// generator
+    fn new_with_generator<G: rand::Rng>(mut generator: G) -> Self {
+        let mut value = Self::new_empty_raw();
+        generator.fill_bytes(&mut value);
+        Self { value }
+    }
+
+    /// Create a new random `WireGuardKey`, with a `rand::thread_rng()` random
+    /// generator
     fn new() -> Self {
-        let mut value = [0; WIREGUARD_KEY_LENGTH];
-        rand::thread_rng().fill_bytes(&mut value);
-        Self { value }
+        Self::new_with_generator(rand::thread_rng())
     }
 
-    fn base64(&self) -> [u8; WIREGUARD_KEY_BASE64_LENGTH] {
-        let mut result = [0; WIREGUARD_KEY_BASE64_LENGTH];
-        let size = base64::engine::general_purpose::STANDARD
-            .encode_slice(&self.value, &mut result)
-            .expect("Failed to format base64 string");
-        if size != WIREGUARD_KEY_BASE64_LENGTH {
-            panic!("Formatted base64 string length not right")
+    /// Encode this key to base64, note it is still raw bytes, users want a 
+    /// `String` shall call `base64_string()` instead
+    fn base64(&self) -> Result<WireGuardKeyBase64> {
+        let mut buffer = Self::new_empty_base64();
+        let size = Self::BASE64_ENGINE
+            .encode_slice(&self.value, &mut buffer)?;
+        if size == Self::LEN_BASE64 {
+            Ok(buffer)
+        } else {
+            Err(Error::Base64LengthIncorrect {
+                expected: Self::LEN_BASE64,
+                actual: size,
+            })
         }
-        result
     }
 
+    /// Encode this key to base64 string
+    fn base64_string(&self) -> String {
+        Self::BASE64_ENGINE.encode(self.value)
+    }
+
+    /// Get the corresponding public key, assuming this is a private key.
+    /// 
+    /// As we don't differentiate on public key or private key, it's totally
+    /// legal to generate a public key of a public key, but that would be of
+    /// no use
     fn pubkey(&self) -> Self {
-        let value = curve25519_dalek::EdwardsPoint::mul_base_clamped(self.value).to_montgomery().to_bytes();
+        let value = curve25519_dalek::EdwardsPoint::mul_base_clamped(
+            self.value).to_montgomery().to_bytes();
         Self { value }
     }
 
-    fn to_file(&self, key_file: &Path) {
-        File::create(key_file).expect("Failed to create key file")
-            .write_all(&self.base64()).expect("Failed to write key file");
+    /// Write this key to file, without encoding
+    fn to_file_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        write_all_checked(
+            &mut file_create_checked(path)?, &self.value)
     }
 
-    fn from_file(key_file: &Path) -> Self {
-        let metadata = key_file.symlink_metadata().expect("Failed to read metadata");
-        if ! metadata.is_file() {
-            panic!("Existing key is not file")
-        }
-        if metadata.size() as usize != WIREGUARD_KEY_BASE64_LENGTH {
-            panic!("Existing key file size not right")
-        }
-        let mut encoded = [0; WIREGUARD_KEY_BASE64_LENGTH];
-        File::open(key_file).expect("Failed to open file")
-            .read_exact(&mut encoded).expect("Failed to read key from file");
-        let mut value = [0; WIREGUARD_KEY_LENGTH];
-        base64::engine::general_purpose::STANDARD
-            .decode_slice(&encoded, &mut value)
-            .expect("Failed to decode base64 string");
-        Self { value }
+    /// Write this key to file, base64 encoded
+    fn to_file_base64<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let base64 = self.base64()?;
+        write_all_checked(&mut file_create_checked(path)?, &base64)
     }
 
-    fn generate_to_file_lazy(key_file: &Path) -> Self {
-        if key_file.exists() {
-            return Self::from_file(key_file)
+    /// Read from file, in which a key is stored base64-encoded
+    fn from_file_base64<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mut base64 = Self::new_empty_base64();
+        read_exact_checked(
+            &mut file_open_checked(path)?, &mut base64)?;
+        let mut value = Self::new_empty_raw();
+        Self::BASE64_ENGINE.decode_slice(&base64, &mut value);
+        Ok( Self { value } )
+    }
+
+    /// Read from file, in which a key is stored as raw un-encoded bytes
+    fn from_file_raw<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mut value = Self::new_empty_raw();
+        read_exact_checked(
+            &mut file_open_checked(path)?, &mut value)?;
+        Ok( Self { value } )
+    }
+
+    /// Read from file if it exists, otherwise generate a new one
+    fn from_file_raw_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        if path.as_ref().exists() {
+            return Self::from_file_raw(path)
         }
         let key = Self::new();
-        key.to_file(key_file);
-        key
-
+        key.to_file_raw(path)?;
+        Ok(key)
     }
 }
 
+type PeerList = BTreeMap<String, PeerConfig>;
+
 #[derive(Debug, Deserialize)]
+/// Config of a peer
 struct PeerConfig {
-    ip: IpNet,
-    #[serde(default)]
-    allow: Vec<IpNet>,
+    /// The IP of the peer inside this network
+    ip: String,
+    /// The endpoint, usually a host + port pair
     #[serde(default)]
     endpoint: String,
+    /// IP ranges outside of the main wireguard range that should be forwarded
+    /// into the wireguard range
+    #[serde(default)]
+    forward: Vec<String>,
+    /// Peer names this peer is able to connect directly in the same level
+    /// - As a child, a peer is always able to connect to its parent
+    /// - If not set (as `None`), this peer is able to connect to any other peer 
+    /// directly at the same level
+    /// - If set (as `Some`), this peer is only able to connect listed peers at
+    /// the same level directly, even if it's empty, in that case it would only
+    /// be able to connect to its parent directly
+    reach: Option<Vec<String>>,
+    /// Child peers connected under this peer.
+    /// - Peers living as child can always connect to their parent. If none of 
+    /// children can connect to other peers, this is essentially a star network
+    /// - Peers, if not explicitly disallowed, can connect to any other peer
+    /// in the same level, this is essentially a full mesh network
+    children: PeerList
 }
+
+// fn peer_reachable(peer_name: &String, peer_config: &PeerConfig, endpoint_name: &String, endpoint_config: &PeerConfig) -> bool {
+//     match (&peer_config.reach, &endpoint_config.reach) {
+//         (Some(peer_reach), Some(endpoint_reach)) => peer_reach.contains(endpoint_name) && endpoint_reach.contains(peer_name),
+//         (Some(peer_reach), None) => peer_reach.contains(endpoint_name),
+//         (None, Some(endpoint_reach)) => endpoint_reach.contains(peer_name),
+//         (None, None) => true,
+//     }
+// }
 
 #[derive(Debug, Deserialize)]
 struct Config {
+    /// Whether to generate pre-shared key for each peer pair
     #[serde(default)]
     psk: bool,
+    /// The .netdev unit name, with or without `.netdev` suffix, (the suffix 
+    /// would be appended automatically), e.g. `30-wireguard`
     netdev: String,
+    /// The .network unit name, with or without `.network` suffix, (the suffix
+    /// would be appended automatically), e.g. `40-wireguard`
     network: String,
+    /// The interface name, e.g. `wg0`
     iface: String,
-    peers: BTreeMap<String, PeerConfig>,
-}
-
-fn content_to_file<C: AsRef<[u8]>>(content: C, file: &Path) {
-    File::create(file).expect("Failed to open file").write_all(content.as_ref()).expect("Failed to write");
+    /// The list of peers
+    peers: PeerList,
 }
 
 impl Config {
@@ -100,7 +272,8 @@ impl Config {
             self.network.push_str(".network")
         }
     }
-    fn write(&self, folder: &Path) {
+
+    fn try_deploy<P: AsRef<Path>>(self, path: P) -> Result<()> {
         let dir_keys = folder.join("keys");
         create_dir_all(&dir_keys).expect("Failed to create keys folder");
         let mut psks = HashMap::new();
@@ -137,11 +310,38 @@ impl Config {
             buffer_network.truncate(len_buffer_network);
             buffer_netdev.push_str(&peer_name);
             buffer_netdev.push_str(".key\n");
+            let mut inter_forward = Vec::new();
+            for (endpoint_name, endpoint_config) in self.peers.iter() {
+                if peer_name == endpoint_name {
+                    continue
+                }
+                if ! peer_reachable(peer_name, peer_config, endpoint_name, endpoint_config) {
+                    inter_forward.push(&endpoint_config.ip);
+                    for forward in &endpoint_config.forward {
+                        inter_forward.push(forward)
+                    }
+                }
+            }
+            {
+                let mut inter_forward_dup = inter_forward.clone();
+                inter_forward_dup.sort_unstable();
+                inter_forward_dup.dedup();
+                if inter_forward_dup.len() != inter_forward.len() {
+                    panic!("Multiple possible inter forwards")
+                }
+            }
             // let (key_peer, pubkey_peer) = keys.get(peer_name).expect("Failed to look up peer key");
             for (endpoint_name, endpoint_config) in self.peers.iter() {
                 if peer_name == endpoint_name {
                     continue
                 }
+                match (&peer_config.reach, &endpoint_config.reach) {
+                    (Some(peer_reach), Some(endpoint_reach)) => todo!(),
+                    (Some(peer_reach), None) => todo!(),
+                    (None, Some(endpoint_reach)) => todo!(),
+                    (None, None) => todo!(),
+                }
+
                 let (key_endpoint, pubkey_endpoint) = keys.get(endpoint_name).expect("Failed to look up endpoint key");
                 buffer_netdev.push_str(&format!("\n[WireGuardPeer]\nPublicKey={}\nAllowedIPs={}\n", String::from_utf8_lossy(&pubkey_endpoint.base64()), endpoint_config.ip));
                 if ! endpoint_config.endpoint.is_empty() {
@@ -151,15 +351,31 @@ impl Config {
             content_to_file(&buffer_netdev, &config.join(&self.netdev));
             content_to_file(&buffer_network, &config.join(&self.network))
         }
+        Ok(Default::default())
     }
 }
 
-fn main() { // arg1: config file, arg2: output dir
+#[derive(Default)]
+struct HostDeployment {
+    name: String,
+    key: WireGuardKey,
+
+}
+
+#[derive(Default)]
+struct AllDeployment {
+    all: PathBuf,
+    hosts: BTreeMap<String, HostDeployment>
+}
+
+fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let mut args = std::env::args_os();
-    let config = args.nth(1).expect("Failed to get first argument for config file path");
-    let output = args.next().expect("Faield to get second argument for output folder");
-    let file = File::open(config).expect("Failed to open config file");
-    let mut config: Config = serde_yaml::from_reader(file).expect("Failed to parse YAML");
+    let config = args.nth(1).ok_or(Error::ArgumentNotRight)?;
+    let output = args.next().ok_or(Error::ArgumentNotRight)?;
+    let mut file = file_open_checked(&config)?;
+    let mut config: Config = serde_yaml::from_reader(&mut file)?;
     config.finalize();
-    config.write(&PathBuf::from(output));
+    config.try_deploy(output)?;
+    Ok(())
+    // config.write(&PathBuf::from(output));
 }
