@@ -1,6 +1,5 @@
-use std::{borrow::Cow, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir, create_dir_all, remove_dir_all, File}, io::{Read, Write}, mem::MaybeUninit, net::IpAddr, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
+use std::{collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir, create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}};
 use base64::Engine;
-use rand::RngCore;
 use serde::{de::DeserializeOwned, Deserialize};
 
 const LEN_CURVE25519_KEY_RAW: usize = 32;
@@ -13,6 +12,9 @@ enum Error {
     Base64LengthIncorrect {
         expected: usize, actual: usize
     },
+    Base64DecodeError (String),
+    Base64DecodeBufferTooSmall,
+    ImpossibleLogic,
     IoError (String),
     YAMLError (String),
 }
@@ -20,6 +22,16 @@ enum Error {
 impl From<base64::EncodeSliceError> for Error {
     fn from(_: base64::EncodeSliceError) -> Self {
         Self::Base64EncodeBufferTooSmall
+    }
+}
+
+impl From<base64::DecodeSliceError> for Error {
+    fn from(value: base64::DecodeSliceError) -> Self {
+        match value {
+            base64::DecodeSliceError::DecodeError(e) => e.into(),
+            base64::DecodeSliceError::OutputSliceTooSmall => 
+                Self::Base64DecodeBufferTooSmall,
+        }
     }
 }
 
@@ -40,6 +52,27 @@ macro_rules! impl_from_error_display {
 
 impl_from_error_display!(std::io::Error, IoError);
 impl_from_error_display!(serde_yaml::Error, YAMLError);
+impl_from_error_display!(base64::DecodeError, Base64DecodeError);
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::ArgumentNotRight => write!(f, "Argument not right"),
+            Error::Base64EncodeBufferTooSmall => 
+                write!(f, "Base64 encode buffer too small"),
+            Error::Base64LengthIncorrect { expected, actual } => 
+                write!(f, "Base64 length incorrect, expected {}, actual {}",
+                    expected, actual),
+            Error::Base64DecodeError(e) => 
+                write!(f, "Base64 decode error: {}", e),
+            Error::Base64DecodeBufferTooSmall => 
+                write!(f, "Base64 decode buffer too small"),
+            Error::ImpossibleLogic => write!(f, "Impossible logic"),
+            Error::IoError(e) => write!(f, "IO Error: {}", e),
+            Error::YAMLError(e) => write!(f, "YAML Error: {}", e),
+        }
+    }
+}
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -73,20 +106,23 @@ fn read_exact_checked<R: Read>(reader: &mut R, data: &mut [u8]) -> Result<()> {
     })
 }
 
+fn create_dir_all_checked<P: AsRef<Path>>(path: P) -> Result<()> {
+    create_dir_all(&path).map_err(|e|{
+        eprintln!("Failed to create dir '{}': {}", path.as_ref().display(), e);
+        e.into()
+    })
+}
+
 fn content_to_file<P: AsRef<Path>>(content: &[u8], path: P) -> Result<()> {
     write_all_checked(&mut file_create_checked(path)?, content)
 }
 
-// pub fn from_reader<R, T>(rdr: R) -> Result<T>
-// where
-//     R: io::Read,
-//     T: DeserializeOwned,
 fn yaml_from_reader_checked<T, R>(reader: &mut R) -> Result<T> 
 where
     T: DeserializeOwned,
     R: Read
 {
-    serde_yaml::from_reader(reader).into()
+    serde_yaml::from_reader(reader).map_err(Into::into)
 }
 
 /// A raw WireGuard key, users shall not use this, but `WireGuardKey` instead
@@ -184,7 +220,7 @@ impl WireGuardKey {
         read_exact_checked(
             &mut file_open_checked(path)?, &mut base64)?;
         let mut value = Self::new_empty_raw();
-        Self::BASE64_ENGINE.decode_slice(&base64, &mut value);
+        Self::BASE64_ENGINE.decode_slice(&base64, &mut value)?;
         Ok( Self { value } )
     }
 
@@ -203,6 +239,16 @@ impl WireGuardKey {
         }
         let key = Self::new();
         key.to_file_raw(path)?;
+        Ok(key)
+    }
+
+    /// Read from file if it exists, otherwise generate a new one
+    fn from_file_base64_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        if path.as_ref().exists() {
+            return Self::from_file_base64(path)
+        }
+        let key = Self::new();
+        key.to_file_base64(path)?;
         Ok(key)
     }
 }
@@ -234,6 +280,7 @@ struct PeerConfig {
     /// children can connect to other peers, this is essentially a star network
     /// - Peers, if not explicitly disallowed, can connect to any other peer
     /// in the same level, this is essentially a full mesh network
+    #[serde(default)]
     children: PeerList
 }
 
@@ -274,98 +321,115 @@ impl Config {
     }
 
     fn try_deploy<P: AsRef<Path>>(self, path: P) -> Result<()> {
-        let dir_keys = folder.join("keys");
-        create_dir_all(&dir_keys).expect("Failed to create keys folder");
-        let mut psks = HashMap::new();
+        struct PersistentKey {
+            key: WireGuardKey,
+            path: PathBuf
+        }
+        let dir_all = path.as_ref();
+        let dir_keys = dir_all.join("keys");
+        create_dir_all_checked(&dir_keys)?;
+        let mut preshared_keys =HashMap::new();
         if self.psk {
             let mut names: Vec<&String> = self.peers.keys().collect();
             names.sort_unstable();
+            let mut name_key = "psk-".to_string();
+            let len_prefix = name_key.len();
             for i in 0..self.peers.len() {
+                let some = names[i];
+                name_key.truncate(len_prefix);
+                name_key.push_str(some);
+                name_key.push('-');
+                let len_prefix = name_key.len();
                 for j in i+1..self.peers.len() {
-                    let some = names[i];
                     let other = names[j];
-                    let key = WireGuardKey::generate_to_file_lazy(&dir_keys.join(format!("psk-{}-{}", some, other)));
-                    let _ = psks.insert((some, other), key);
+                    name_key.truncate(len_prefix);
+                    name_key.push_str(other);
+                    let path_key = dir_keys.join(&name_key);
+                    let key = 
+                        WireGuardKey::from_file_base64_or_new(&path_key)?;
+                    if preshared_keys.insert((some, other), key).is_some(){
+                        eprintln!("Duplicated preshared-key pair for {} and {},
+                            impossible", some, other);
+                        return Err(Error::ImpossibleLogic)
+                    }
                 }
             }
         }
         let mut keys = HashMap::new();
-        for (peer_name, peer_config) in self.peers.iter() {
-            let key_peer = WireGuardKey::generate_to_file_lazy(&dir_keys.join(format!("private-{}", peer_name)));
-            let pubkey_peer = key_peer.pubkey();
-            keys.insert(peer_name, (key_peer, pubkey_peer));
+        {
+            let mut name_key = "private-".to_string();
+            let len_prefix = name_key.len();
+            for name in self.peers.keys() {
+                name_key.truncate(len_prefix);
+                name_key.push_str(name);
+                let path_key = dir_keys.join(&name_key);
+                let key = 
+                    WireGuardKey::from_file_base64_or_new(&path_key)?;
+                let pubkey = key.pubkey();
+                if keys.insert(name, (key, pubkey)).is_some() {
+                    eprintln!("Duplicated private & public key for {},
+                        impossible", name);
+                    return Err(Error::ImpossibleLogic)
+                }
+            }
         }
+        // let configs = folder.join("configs");
+        // let _ = remove_dir_all(&configs);
+        // create_dir_all(&configs).expect("Failed to create configs folder");
+        // let mut buffer_netdev = format!("[NetDev]\nName={}\nKind=wireguard\n\n[WireGuard]\nListenPort=51820\nPrivateKeyFile=/etc/systemd/network/.keys/wg/", self.iface);
+        // let len_buffer_netdev = buffer_netdev.len();
+        // let mut buffer_network = format!("[Match]\nName={}\n\n", self.iface);
+        // let len_buffer_network = buffer_network.len();
+        // for (peer_name, peer_config) in self.peers.iter() {
+        //     let config = configs.join(peer_name);
+        //     create_dir(&config).expect("Failed to create config folder");
+        //     buffer_netdev.truncate(len_buffer_netdev);
+        //     buffer_network.truncate(len_buffer_network);
+        //     buffer_netdev.push_str(&peer_name);
+        //     buffer_netdev.push_str(".key\n");
+        //     let mut inter_forward = Vec::new();
+        //     for (endpoint_name, endpoint_config) in self.peers.iter() {
+        //         if peer_name == endpoint_name {
+        //             continue
+        //         }
+        //         if ! peer_reachable(peer_name, peer_config, endpoint_name, endpoint_config) {
+        //             inter_forward.push(&endpoint_config.ip);
+        //             for forward in &endpoint_config.forward {
+        //                 inter_forward.push(forward)
+        //             }
+        //         }
+        //     }
+        //     {
+        //         let mut inter_forward_dup = inter_forward.clone();
+        //         inter_forward_dup.sort_unstable();
+        //         inter_forward_dup.dedup();
+        //         if inter_forward_dup.len() != inter_forward.len() {
+        //             panic!("Multiple possible inter forwards")
+        //         }
+        //     }
+        //     // let (key_peer, pubkey_peer) = keys.get(peer_name).expect("Failed to look up peer key");
+        //     for (endpoint_name, endpoint_config) in self.peers.iter() {
+        //         if peer_name == endpoint_name {
+        //             continue
+        //         }
+        //         match (&peer_config.reach, &endpoint_config.reach) {
+        //             (Some(peer_reach), Some(endpoint_reach)) => todo!(),
+        //             (Some(peer_reach), None) => todo!(),
+        //             (None, Some(endpoint_reach)) => todo!(),
+        //             (None, None) => todo!(),
+        //         }
 
-        let configs = folder.join("configs");
-        let _ = remove_dir_all(&configs);
-        create_dir_all(&configs).expect("Failed to create configs folder");
-        let mut buffer_netdev = format!("[NetDev]\nName={}\nKind=wireguard\n\n[WireGuard]\nListenPort=51820\nPrivateKeyFile=/etc/systemd/network/.keys/wg/", self.iface);
-        let len_buffer_netdev = buffer_netdev.len();
-        let mut buffer_network = format!("[Match]\nName={}\n\n", self.iface);
-        let len_buffer_network = buffer_network.len();
-        for (peer_name, peer_config) in self.peers.iter() {
-            let config = configs.join(peer_name);
-            create_dir(&config).expect("Failed to create config folder");
-            buffer_netdev.truncate(len_buffer_netdev);
-            buffer_network.truncate(len_buffer_network);
-            buffer_netdev.push_str(&peer_name);
-            buffer_netdev.push_str(".key\n");
-            let mut inter_forward = Vec::new();
-            for (endpoint_name, endpoint_config) in self.peers.iter() {
-                if peer_name == endpoint_name {
-                    continue
-                }
-                if ! peer_reachable(peer_name, peer_config, endpoint_name, endpoint_config) {
-                    inter_forward.push(&endpoint_config.ip);
-                    for forward in &endpoint_config.forward {
-                        inter_forward.push(forward)
-                    }
-                }
-            }
-            {
-                let mut inter_forward_dup = inter_forward.clone();
-                inter_forward_dup.sort_unstable();
-                inter_forward_dup.dedup();
-                if inter_forward_dup.len() != inter_forward.len() {
-                    panic!("Multiple possible inter forwards")
-                }
-            }
-            // let (key_peer, pubkey_peer) = keys.get(peer_name).expect("Failed to look up peer key");
-            for (endpoint_name, endpoint_config) in self.peers.iter() {
-                if peer_name == endpoint_name {
-                    continue
-                }
-                match (&peer_config.reach, &endpoint_config.reach) {
-                    (Some(peer_reach), Some(endpoint_reach)) => todo!(),
-                    (Some(peer_reach), None) => todo!(),
-                    (None, Some(endpoint_reach)) => todo!(),
-                    (None, None) => todo!(),
-                }
-
-                let (key_endpoint, pubkey_endpoint) = keys.get(endpoint_name).expect("Failed to look up endpoint key");
-                buffer_netdev.push_str(&format!("\n[WireGuardPeer]\nPublicKey={}\nAllowedIPs={}\n", String::from_utf8_lossy(&pubkey_endpoint.base64()), endpoint_config.ip));
-                if ! endpoint_config.endpoint.is_empty() {
-                    buffer_netdev.push_str(&format!("Endpoint={}", endpoint_config.endpoint))
-                }
-            }
-            content_to_file(&buffer_netdev, &config.join(&self.netdev));
-            content_to_file(&buffer_network, &config.join(&self.network))
-        }
+        //         let (key_endpoint, pubkey_endpoint) = keys.get(endpoint_name).expect("Failed to look up endpoint key");
+        //         buffer_netdev.push_str(&format!("\n[WireGuardPeer]\nPublicKey={}\nAllowedIPs={}\n", String::from_utf8_lossy(&pubkey_endpoint.base64()), endpoint_config.ip));
+        //         if ! endpoint_config.endpoint.is_empty() {
+        //             buffer_netdev.push_str(&format!("Endpoint={}", endpoint_config.endpoint))
+        //         }
+        //     }
+        //     content_to_file(&buffer_netdev, &config.join(&self.netdev));
+        //     content_to_file(&buffer_network, &config.join(&self.network))
+        // }
         Ok(Default::default())
     }
-}
-
-#[derive(Default)]
-struct HostDeployment {
-    name: String,
-    key: WireGuardKey,
-
-}
-
-#[derive(Default)]
-struct AllDeployment {
-    all: PathBuf,
-    hosts: BTreeMap<String, HostDeployment>
 }
 
 fn main() -> Result<()> { // arg1: config file, arg2: output dir
@@ -373,9 +437,8 @@ fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let config = args.nth(1).ok_or(Error::ArgumentNotRight)?;
     let output = args.next().ok_or(Error::ArgumentNotRight)?;
     let mut file = file_open_checked(&config)?;
-    let mut config: Config = serde_yaml::from_reader(&mut file)?;
+    let mut config: Config = yaml_from_reader_checked(&mut file)?;
     config.finalize();
     config.try_deploy(output)?;
     Ok(())
-    // config.write(&PathBuf::from(output));
 }
