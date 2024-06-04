@@ -274,7 +274,7 @@ struct PeerConfig {
     /// - If set (as `Some`), this peer is only able to connect listed peers at
     /// the same level directly, even if it's empty, in that case it would only
     /// be able to connect to its parent directly
-    reach: Option<Vec<String>>,
+    direct: Option<Vec<String>>,
     /// Child peers connected under this peer.
     /// - Peers living as child can always connect to their parent. If none of 
     /// children can connect to other peers, this is essentially a star network
@@ -321,15 +321,11 @@ impl Config {
     }
 
     fn try_deploy<P: AsRef<Path>>(self, path: P) -> Result<()> {
-        struct PersistentKey {
-            key: WireGuardKey,
-            path: PathBuf
-        }
         let dir_all = path.as_ref();
         let dir_keys = dir_all.join("keys");
         create_dir_all_checked(&dir_keys)?;
         let mut preshared_keys =HashMap::new();
-        if self.psk {
+        if self.psk { 
             let mut names: Vec<&String> = self.peers.keys().collect();
             names.sort_unstable();
             let mut name_key = "psk-".to_string();
@@ -372,6 +368,30 @@ impl Config {
                     return Err(Error::ImpossibleLogic)
                 }
             }
+        }
+
+        struct NetDevKeyFile {
+            key: WireGuardKey,
+            /// If this is empty, then no file, but only raw
+            suffix: String,
+        }
+        struct NetDevPeer {
+            allowed: Vec<String>,
+            pubkey: WireGuardKey,
+            endpoint: String,
+            psk: Option<NetDevKeyFile>,
+        }
+        struct NetDevConfig {
+            key: WireGuardKey,
+            peers: Vec<NetDevPeer>
+        }
+        struct NetWorkConfig {
+            address: String,
+            routes: Vec<String>,
+        }
+        struct CompositeConfig {
+            netdev: NetDevConfig,
+            network: NetWorkConfig
         }
         // let configs = folder.join("configs");
         // let _ = remove_dir_all(&configs);

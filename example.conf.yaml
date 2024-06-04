@@ -32,27 +32,27 @@ peers:
       rz5:
         ip: 192.168.77.97/24
         endpoint: rz5.lan
-        # The selective peers in the same level this peer is able to connect
+        # The selective peers in the same level this peer is able to connect directly, instead of going through the parent
         #  - This peer is always able to connect to its parent, if it lives in a recursive subnet (like this to `hk1`)
         #  - If not set, this peer is able to connect to every other peer at the same level
         #  - If set, this peer is only able to connect selective peers at the same level
         #    - Specially, if set to empty, this peer is considierd unable to connect to any other peer (other than parent)
         # In any case, to create route, two peers must be considered able to connect to each other
         # In any case, peers in different levels can neven connect to each other
-        reach:
+        direct: [hk1]
       l3a:
         ip: 192.168.77.98/24
         endpoint: l3a.lan
-        reach:
+        direct: []
       cm2:
         ip: 192.168.77.99/24
         endpoint: cm2.lan
-        reach:
+        direct: []
       r33:
         ip: 192.168.77.100/24
         endpoint: r33.lan
-        reach:
+        direct: []
       mi3:
         ip: 192.168.77.101/24
         endpoint: mi3.lan
-        reach:
+        direct: []
