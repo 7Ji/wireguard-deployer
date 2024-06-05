@@ -132,7 +132,7 @@ type WireGuardKeyBase64 = [u8; WireGuardKey::LEN_BASE64];
 
 /// A WireGuard-compatible key, does not differentiate public or private by 
 /// itself, user should take care of that
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct WireGuardKey {
     value: WireGuardKeyRaw
 }
@@ -370,29 +370,6 @@ impl Config {
             }
         }
 
-        struct NetDevKeyFile {
-            key: WireGuardKey,
-            /// If this is empty, then no file, but only raw
-            suffix: String,
-        }
-        struct NetDevPeer {
-            allowed: Vec<String>,
-            pubkey: WireGuardKey,
-            endpoint: String,
-            psk: Option<NetDevKeyFile>,
-        }
-        struct NetDevConfig {
-            key: WireGuardKey,
-            peers: Vec<NetDevPeer>
-        }
-        struct NetWorkConfig {
-            address: String,
-            routes: Vec<String>,
-        }
-        struct CompositeConfig {
-            netdev: NetDevConfig,
-            network: NetWorkConfig
-        }
         // let configs = folder.join("configs");
         // let _ = remove_dir_all(&configs);
         // create_dir_all(&configs).expect("Failed to create configs folder");
@@ -451,6 +428,146 @@ impl Config {
         Ok(Default::default())
     }
 }
+
+
+/// A wireguard key in netdev that shall be stored in a file
+#[derive(Debug, Default)]
+struct NetDevKeyFile {
+    /// The backing key
+    key: WireGuardKey,
+    /// The file name this key shall be stored, inside the folder
+    /// `/etc/systemd/network/keys/wg`
+    filename: String,
+}
+
+/// A wireguard peer in a netdev
+#[derive(Debug, Default)]
+struct NetDevPeer {
+    /// The incoming IP ranges this is allowed to access, also hinting whether
+    /// traffic should go through this peer if a corresponding range is found
+    allowed: Vec<String>,
+    /// The public key of this peer
+    pubkey: WireGuardKey,
+    /// The endpoint
+    endpoint: String,
+    /// The pre-shared key between the peer
+    psk: Option<NetDevKeyFile>,
+}
+
+/// A .netdev config
+#[derive(Debug, Default)]
+struct NetDevConfig {
+    /// The private key of the netdev
+    key: NetDevKeyFile,
+    /// The peers
+    peers: Vec<NetDevPeer>
+}
+
+/// A .network config
+#[derive(Debug, Default)]
+struct NetWorkConfig {
+    address: String,
+    routes: Vec<String>,
+}
+
+/// A .netdev + .network config
+#[derive(Debug, Default)]
+struct CompositeConfig {
+    netdev: NetDevConfig,
+    network: NetWorkConfig
+}
+
+
+#[derive(Debug, Default)]
+struct ConfigsToWrite {
+    map: BTreeMap<String, CompositeConfig>
+}
+
+impl ConfigsToWrite {
+    fn try_parse_config(config: &Config) -> Result<Self> {
+        let mut map = BTreeMap::<String, CompositeConfig>::new();
+        for (peer_name, peer_config) in config.peers.iter() {
+            if map.insert(
+                peer_name.clone(), Default::default()).is_some() 
+            {
+                eprintln!("Duplicated peer {}, impossible", peer_name);
+                return Err(Error::ImpossibleLogic)
+            }
+        }
+        Ok(Self { map })
+    }
+
+    fn try_write<P: AsRef<Path>>(&self, path: P, name_netdev: &str, name_network: &str, name_iface: &str) -> Result<()> {
+        let dir_all = path.as_ref();
+        let dir_configs = dir_all.join("configs");
+        // let dir_keys = dir_all.join("keys");
+        // let dir_keys = dir_keys.as_path();
+        let _ = remove_dir_all(&dir_configs);
+        create_dir_all_checked(&dir_configs)?;
+        // create_dir_all_checked(dir_keys)?;
+        let mut buffer = String::new();
+        for (name, config) in self.map.iter() {
+            let dir_config = dir_configs.join(name);
+            let dir_keys = dir_config.join("keys/wg");
+            create_dir_all_checked(&dir_keys)?;
+
+            let netdev = &config.netdev;
+            buffer.clear();
+            buffer.push_str("[NetDev]\nName=");
+            macro_rules! buffer_add_key_file {
+                ($key_file: expr) => {
+                    buffer.push_str(&$key_file.filename);
+                    content_to_file(&$key_file.key.base64()?, 
+                        &dir_keys.join(&$key_file.filename))?;
+                };
+            }
+            buffer.push_str(name_iface);
+            buffer.push_str("\n\
+                Kind=wireguard\n\n\
+                [WireGuard]\n\
+                ListenPort=51820\n\
+                PrivateKeyFile=/etc/systemd/network/keys/wg/");
+            buffer_add_key_file!(netdev.key);
+            buffer.push('\n');
+            for peer in netdev.peers.iter() {
+                buffer.push_str("\n[WireGuardPeer]\nPublicKey=");
+                buffer.push_str(&peer.pubkey.base64_string());
+                if let Some(psk) = &peer.psk {
+                    buffer.push_str("\nPreSharedKeyFile=");
+                    buffer_add_key_file!(psk);
+                }
+                if ! peer.endpoint.is_empty() {
+                    buffer.push_str("\nEndpoint=");
+                    buffer.push_str(&peer.endpoint);
+                }
+                for allowed in peer.allowed.iter() {
+                    buffer.push_str("\nAllowedIPs=");
+                    buffer.push_str(&allowed);
+                }
+                buffer.push('\n');
+            }
+            content_to_file(buffer.as_bytes(), 
+                &dir_config.join(name_netdev))?;
+            
+            let network = &config.network;
+            buffer.clear();
+            buffer.push_str("[Match]\nName=");
+            buffer.push_str(name_iface);
+            buffer.push_str("\n\n[Network]\nAddress=");
+            buffer.push_str(&network.address);
+            for route in network.routes.iter() {
+                buffer.push_str("\n\n[Route]\nDestination=");
+                buffer.push_str(route);
+                buffer.push_str("\nScope=link");
+            }
+            buffer.push('\n');
+            content_to_file(buffer.as_bytes(),
+                &dir_config.join(name_network))?;
+        }
+        Ok(())
+    }
+}
+
 
 fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let mut args = std::env::args_os();
