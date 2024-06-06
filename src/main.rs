@@ -406,7 +406,7 @@ struct RouteInfo {
 
 type RoutesMap = BTreeMap<String, RouteInfo>;
 
-fn map_try_add_route(routes_map: &mut RoutesMap, 
+fn routes_map_try_add(routes_map: &mut RoutesMap, 
     target: &str, via: &str, jump: usize, external: bool
 ) -> Result<()> 
 {
@@ -419,14 +419,14 @@ fn map_try_add_route(routes_map: &mut RoutesMap,
     }
 }
 
-fn map_try_add_routes_from_peer(
+fn routes_map_try_add_from_peer(
     routes_map: &mut RoutesMap, peer_name: &str, peer_config: &PeerConfig
 ) -> Result<()> 
 {
-    map_try_add_route(routes_map, 
+    routes_map_try_add(routes_map, 
         &peer_config.ip, peer_name, 1, false)?;
     for forward in peer_config.forward.iter() {
-        map_try_add_route(routes_map, 
+        routes_map_try_add(routes_map, 
             &forward, peer_name, 1, true)?;
     }
     Ok(())
@@ -477,14 +477,14 @@ impl ConfigsToWriteParsing {
             self.targets.push(forward.clone())
         }
         let mut routes_map = RoutesMap::default();
-        map_try_add_route(&mut routes_map, 
+        routes_map_try_add(&mut routes_map, 
             &peer_config.ip, "", 0, false)?;
         for forward in peer_config.forward.iter() {
-            map_try_add_route(&mut routes_map, 
+            routes_map_try_add(&mut routes_map, 
                 &forward, "", 0, true)?;
         }
         if let Some((parent_name, parent_config)) = parent {
-            map_try_add_routes_from_peer(&mut routes_map, parent_name, parent_config)?;
+            routes_map_try_add_from_peer(&mut routes_map, parent_name, parent_config)?;
         }
         // Parent
         // Neighbors
@@ -504,7 +504,7 @@ impl ConfigsToWriteParsing {
                     continue
                 }
             }
-            map_try_add_routes_from_peer(&mut routes_map, 
+            routes_map_try_add_from_peer(&mut routes_map, 
                 &neighbor_name, neighbor_config)?
         }
         match self.map.insert(
@@ -535,14 +535,41 @@ impl ConfigsToWriteParsing {
     fn finish_routes(&mut self) -> Result<()> {
         self.targets.sort_unstable();
         self.targets.dedup();
+        loop {
+            let mut updated = false;
+            for (peer_name, (_, routes_map)) in self.map.iter_mut() {
+                if routes_map.len() == self.targets.len() {
+                    continue
+                }
+                for route_target in self.targets.iter() {
+                    if routes_map.contains_key(route_target) {
+                        continue
+                    }
+                    // Look for route
+                    let mut via = "";
+                    let mut jump = 0;
+                    let mut external = false;
+                    // for (other_name, (_, other_map)) in self.map.iter() {
+                        
+                    // }
+                    if ! via.is_empty() && jump != 0 {
+                        routes_map_try_add(routes_map, route_target, via, jump, external)?;
+                        updated = true
+                    }
+                }
+            }
+            if ! updated {
+                break
+            }
+        }
         for (peer_name, (peer_config, 
             routes_map)) in 
             self.map.iter_mut() 
         {
-            for (target, route_info) in routes_map.iter() {
+            for (route_target, route_info) in routes_map.iter() {
                 if route_info.jump == 0 { continue }
                 if route_info.external {
-                    peer_config.network.routes.push(target.clone())
+                    peer_config.network.routes.push(route_target.clone())
                 }
             }
         }
