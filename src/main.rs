@@ -260,7 +260,22 @@ type PeerList = BTreeMap<String, PeerConfig>;
 struct PeerConfig {
     /// The IP of the peer inside this network
     ip: String,
-    /// The endpoint, usually a host + port pair
+    /// The .netdev unit name, without `.netdev` suffix, (the suffix would be 
+    /// appended automatically), e.g. `30-wireguard`, if this is empty
+    /// then the global `netdev` would be used.
+    #[serde(default)]
+    netdev: String,
+    /// The .network unit name, without `.network` suffix, (the suffix would be 
+    /// appended automatically), e.g. `40-wireguard`, if this is empty
+    /// then the global `network` would be used
+    #[serde(default)]
+    network: String,
+    /// The interface name, if this is kept empty then the global `iface` would
+    /// be used
+    #[serde(default)]
+    iface: String,
+    /// The endpoint, i.e. the IP outside this network that other peers can 
+    /// connect accordingly, usually a host + port pair
     #[serde(default)]
     endpoint: String,
     /// IP ranges outside of the main wireguard range that should be forwarded
@@ -298,11 +313,11 @@ struct Config {
     /// Whether to generate pre-shared key for each peer pair
     #[serde(default)]
     psk: bool,
-    /// The .netdev unit name, with or without `.netdev` suffix, (the suffix 
-    /// would be appended automatically), e.g. `30-wireguard`
+    /// The .netdev unit name, without `.netdev` suffix, (the suffix would be 
+    /// appended automatically), e.g. `30-wireguard`
     netdev: String,
-    /// The .network unit name, with or without `.network` suffix, (the suffix
-    /// would be appended automatically), e.g. `40-wireguard`
+    /// The .network unit name, without `.network` suffix, (the suffix would be 
+    /// appended automatically), e.g. `40-wireguard`
     network: String,
     /// The interface name, e.g. `wg0`
     iface: String,
@@ -349,6 +364,7 @@ struct NetDevPeer {
 /// A .netdev config
 #[derive(Debug, Default)]
 struct NetDevConfig {
+    name: String,
     /// The private key of the netdev
     key: NetDevKeyFile,
     /// The peers
@@ -358,6 +374,7 @@ struct NetDevConfig {
 /// A .network config
 #[derive(Debug, Default)]
 struct NetWorkConfig {
+    name: String,
     address: String,
     routes: Vec<String>,
 }
@@ -365,6 +382,7 @@ struct NetWorkConfig {
 /// A .netdev + .network config
 #[derive(Debug, Default)]
 struct CompositeConfig {
+    iface: String,
     netdev: NetDevConfig,
     network: NetWorkConfig
 }
@@ -376,11 +394,64 @@ struct ConfigsToWrite {
 }
 
 impl ConfigsToWrite {
+    fn try_add_peer(&mut self, dir_keys: &Path,
+        config: &Config, peer_name: &str, peer_config: &PeerConfig
+    ) -> Result<()> 
+    {
+        macro_rules! string_non_empty_or_global {
+            ($name: ident) => {
+                if peer_config.$name.is_empty() {
+                    config.$name.clone()
+                } else {
+                    peer_config.$name.clone()
+                }
+            };
+        }
+        let composite = CompositeConfig {
+            iface: string_non_empty_or_global!(iface),
+            netdev: NetDevConfig {
+                name: string_non_empty_or_global!(netdev),
+                key: {
+                    let filename = format!("private-{}", peer_name);
+                    let key = 
+                        WireGuardKey::from_file_base64_or_new(
+                            &dir_keys.join(&filename))?;
+                    NetDevKeyFile { key, filename }
+                },
+                peers: Default::default(),
+            },
+            network: NetWorkConfig {
+                name: string_non_empty_or_global!(network),
+                address: peer_config.ip.clone(),
+                routes: Default::default(),
+            },
+        };
+        match self.map.insert(peer_name.to_string(), composite) {
+            Some(_) => {
+                eprintln!("Duplicated peer {}, impossible", peer_name);
+                Err(Error::ImpossibleLogic)
+            },
+            None => Ok(()),
+        }
+    }
+
+    fn try_add_peers(&mut self, 
+        dir_keys: &Path, config: &Config, peers: &PeerList
+    ) -> Result<()> 
+    {
+        for (peer_name, peer_config) in peers.iter() {
+            self.try_add_peer(dir_keys, config, peer_name, peer_config)?;
+            self.try_add_peers(dir_keys, config, &peer_config.children)?;
+        }
+        Ok(())
+    }
+
     fn try_from_config<P: AsRef<Path>>(config: &Config, dir_all: P) -> Result<Self> {
         let mut result = Self::default();
-        let map = &mut result.map;
-        let dir_keys = &dir_all.as_ref().join("keys");
+        let dir_keys = dir_all.as_ref().join("keys");
         create_dir_all_checked(&dir_keys)?;
+        result.try_add_peers(&dir_keys, config, &config.peers)?;
+        
         // let mut preshared_keys =HashMap::new();
         // if config.psk { 
         //     let mut names: Vec<&String> = config.peers.keys().collect();
@@ -426,26 +497,12 @@ impl ConfigsToWrite {
         //         }
         //     }
         // }
-        for (peer_name, peer_config) in config.peers.iter() {
-            // let composite = CompositeConfig {
-            //     netdev: NetDevConfig { key: (), peers: () },
-            //     network: todo!(),
-            // }
-            if map.insert(
-                peer_name.clone(), Default::default()).is_some() 
-            {
-                eprintln!("Duplicated peer {}, impossible", peer_name);
-                return Err(Error::ImpossibleLogic)
-            }
-        }
+        // self.tr
         Ok(result)
     }
 
-    fn try_write<P: AsRef<Path>>(&self, path: P, name_netdev: &str, name_network: &str, name_iface: &str) -> Result<()> {
-        let dir_all = path.as_ref();
-        let dir_configs = dir_all.join("configs");
-        // let dir_keys = dir_all.join("keys");
-        // let dir_keys = dir_keys.as_path();
+    fn try_write<P: AsRef<Path>>(&self, dir_all: P) -> Result<()> {
+        let dir_configs = dir_all.as_ref().join("configs");
         let _ = remove_dir_all(&dir_configs);
         create_dir_all_checked(&dir_configs)?;
         // create_dir_all_checked(dir_keys)?;
@@ -465,7 +522,7 @@ impl ConfigsToWrite {
                         &dir_keys.join(&$key_file.filename))?;
                 };
             }
-            buffer.push_str(name_iface);
+            buffer.push_str(&config.iface);
             buffer.push_str("\n\
                 Kind=wireguard\n\n\
                 [WireGuard]\n\
@@ -491,12 +548,13 @@ impl ConfigsToWrite {
                 buffer.push('\n');
             }
             content_to_file(buffer.as_bytes(), 
-                &dir_config.join(name_netdev))?;
+                &dir_config.join(
+                    format!("{}.netdev", &netdev.name)))?;
             
             let network = &config.network;
             buffer.clear();
             buffer.push_str("[Match]\nName=");
-            buffer.push_str(name_iface);
+            buffer.push_str(&config.iface);
             buffer.push_str("\n\n[Network]\nAddress=");
             buffer.push_str(&network.address);
             for route in network.routes.iter() {
@@ -506,7 +564,8 @@ impl ConfigsToWrite {
             }
             buffer.push('\n');
             content_to_file(buffer.as_bytes(),
-                &dir_config.join(name_network))?;
+                &dir_config.join(
+                    format!("{}.network", network.name)))?;
         }
         Ok(())
     }
@@ -522,6 +581,5 @@ fn main() -> Result<()> { // arg1: config file, arg2: output dir
     config.finalize();
     let configs_to_write = 
         ConfigsToWrite::try_from_config(&config, &output)?;
-    configs_to_write.try_write(&output, &config.netdev,
-        &config.network, &config.iface)
+    configs_to_write.try_write(&output)
 }

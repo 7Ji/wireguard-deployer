@@ -4,7 +4,7 @@ psk: true
 netdev: 30-wireguard
 # Name of the interface
 iface: wg0
-# Name of .network, with or without suffix
+# Name of .network, without suffix
 network: 40-wireguard
 # The below peers assemble a pseudo full-mesh network in which fuo, pdh, hk1 are able to connect to each other,
 # but all other peers connect to the above network using hk1 as a "gateway". fuo, pdh, hk1 themselves assemble
