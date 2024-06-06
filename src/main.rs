@@ -14,6 +14,7 @@ enum Error {
     },
     Base64DecodeError (String),
     Base64DecodeBufferTooSmall,
+    DuplicatedRoute,
     ImpossibleLogic,
     IoError (String),
     YAMLError (String),
@@ -67,6 +68,8 @@ impl std::fmt::Display for Error {
                 write!(f, "Base64 decode error: {}", e),
             Error::Base64DecodeBufferTooSmall => 
                 write!(f, "Base64 decode buffer too small"),
+            Error::DuplicatedRoute =>
+                write!(f, "Duplicated route"),
             Error::ImpossibleLogic => write!(f, "Impossible logic"),
             Error::IoError(e) => write!(f, "IO Error: {}", e),
             Error::YAMLError(e) => write!(f, "YAML Error: {}", e),
@@ -387,15 +390,58 @@ struct CompositeConfig {
     network: NetWorkConfig
 }
 
-
 #[derive(Debug, Default)]
 struct ConfigsToWrite {
     map: BTreeMap<String, CompositeConfig>
 }
 
-impl ConfigsToWrite {
+#[derive(Debug, Default)]
+struct RouteInfo {
+    via: String,
+    jump: usize, // special value 0 for self
+    external: bool
+}
+
+// const LOCAL_ROUTE: RouteInfo = RouteInfo { via: String::new(), jump: 0 };
+
+type RoutesMap = BTreeMap<String, RouteInfo>;
+
+fn map_try_add_route(routes_map: &mut RoutesMap, 
+    target: &str, via: &str, jump: usize, external: bool
+) -> Result<()> 
+{
+    let via = via.into();
+    let route_info = RouteInfo { via, jump, external };
+    if routes_map.insert(target.into(), route_info).is_some() {
+        Err(Error::DuplicatedRoute)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_try_add_routes_from_peer(
+    routes_map: &mut RoutesMap, peer_name: &str, peer_config: &PeerConfig
+) -> Result<()> 
+{
+    map_try_add_route(routes_map, 
+        &peer_config.ip, peer_name, 1, false)?;
+    for forward in peer_config.forward.iter() {
+        map_try_add_route(routes_map, 
+            &forward, peer_name, 1, true)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ConfigsToWriteParsing {
+    map: BTreeMap<String, (CompositeConfig, RoutesMap)>,
+    targets: Vec<String>,
+}
+
+impl ConfigsToWriteParsing {
     fn try_add_peer(&mut self, dir_keys: &Path,
-        config: &Config, peer_name: &str, peer_config: &PeerConfig
+        config: &Config, peer_name: &String, peer_config: &PeerConfig,
+        neighbors: &PeerList, parent: Option<(&str, &PeerConfig)>
     ) -> Result<()> 
     {
         macro_rules! string_non_empty_or_global {
@@ -426,7 +472,44 @@ impl ConfigsToWrite {
                 routes: Default::default(),
             },
         };
-        match self.map.insert(peer_name.to_string(), composite) {
+        self.targets.push(peer_config.ip.clone());
+        for forward in peer_config.forward.iter() {
+            self.targets.push(forward.clone())
+        }
+        let mut routes_map = RoutesMap::default();
+        map_try_add_route(&mut routes_map, 
+            &peer_config.ip, "", 0, false)?;
+        for forward in peer_config.forward.iter() {
+            map_try_add_route(&mut routes_map, 
+                &forward, "", 0, true)?;
+        }
+        if let Some((parent_name, parent_config)) = parent {
+            map_try_add_routes_from_peer(&mut routes_map, parent_name, parent_config)?;
+        }
+        // Parent
+        // Neighbors
+        for (neighbor_name, neighbor_config) 
+            in neighbors.iter() 
+        {
+            if neighbor_name == peer_name {
+                continue
+            }
+            if let Some(direct) = &peer_config.direct {
+                if ! direct.contains(neighbor_name) {
+                    continue
+                }
+            }
+            if let Some(direct) = &neighbor_config.direct {
+                if ! direct.contains(peer_name) {
+                    continue
+                }
+            }
+            map_try_add_routes_from_peer(&mut routes_map, 
+                &neighbor_name, neighbor_config)?
+        }
+        match self.map.insert(
+            peer_name.to_string(), (composite, routes_map)
+        ) {
             Some(_) => {
                 eprintln!("Duplicated peer {}, impossible", peer_name);
                 Err(Error::ImpossibleLogic)
@@ -436,69 +519,59 @@ impl ConfigsToWrite {
     }
 
     fn try_add_peers(&mut self, 
-        dir_keys: &Path, config: &Config, peers: &PeerList
+        dir_keys: &Path, config: &Config, peers: &PeerList,
+        parent: Option<(&str, &PeerConfig)>
     ) -> Result<()> 
     {
         for (peer_name, peer_config) in peers.iter() {
-            self.try_add_peer(dir_keys, config, peer_name, peer_config)?;
-            self.try_add_peers(dir_keys, config, &peer_config.children)?;
+            self.try_add_peer(dir_keys, config, peer_name, peer_config,
+                peers, parent)?;
+            self.try_add_peers(dir_keys, config, &peer_config.children, 
+                Some((peer_name, peer_config)))?;
         }
         Ok(())
     }
 
-    fn try_from_config<P: AsRef<Path>>(config: &Config, dir_all: P) -> Result<Self> {
+    fn finish_routes(&mut self) -> Result<()> {
+        self.targets.sort_unstable();
+        self.targets.dedup();
+        for (peer_name, (peer_config, 
+            routes_map)) in 
+            self.map.iter_mut() 
+        {
+            for (target, route_info) in routes_map.iter() {
+                if route_info.jump == 0 { continue }
+                if route_info.external {
+                    peer_config.network.routes.push(target.clone())
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn try_from_config<P: AsRef<Path>>(config: &Config, dir_all: P) 
+        -> Result<Self> 
+    {
         let mut result = Self::default();
         let dir_keys = dir_all.as_ref().join("keys");
         create_dir_all_checked(&dir_keys)?;
-        result.try_add_peers(&dir_keys, config, &config.peers)?;
-        
-        // let mut preshared_keys =HashMap::new();
-        // if config.psk { 
-        //     let mut names: Vec<&String> = config.peers.keys().collect();
-        //     names.sort_unstable();
-        //     let mut name_key = "psk-".to_string();
-        //     let len_prefix = name_key.len();
-        //     for i in 0..config.peers.len() {
-        //         let some = names[i];
-        //         name_key.truncate(len_prefix);
-        //         name_key.push_str(some);
-        //         name_key.push('-');
-        //         let len_prefix = name_key.len();
-        //         for j in i+1..config.peers.len() {
-        //             let other = names[j];
-        //             name_key.truncate(len_prefix);
-        //             name_key.push_str(other);
-        //             let path_key = dir_keys.join(&name_key);
-        //             let key = 
-        //                 WireGuardKey::from_file_base64_or_new(&path_key)?;
-        //             if preshared_keys.insert((some, other), key).is_some(){
-        //                 eprintln!("Duplicated preshared-key pair for {} and {},
-        //                     impossible", some, other);
-        //                 return Err(Error::ImpossibleLogic)
-        //             }
-        //         }
-        //     }
-        // }
-        // let mut keys = HashMap::new();
-        // {
-        //     let mut name_key = "private-".to_string();
-        //     let len_prefix = name_key.len();
-        //     for name in config.peers.keys() {
-        //         name_key.truncate(len_prefix);
-        //         name_key.push_str(name);
-        //         let path_key = dir_keys.join(&name_key);
-        //         let key = 
-        //             WireGuardKey::from_file_base64_or_new(&path_key)?;
-        //         let pubkey = key.pubkey();
-        //         if keys.insert(name, (key, pubkey)).is_some() {
-        //             eprintln!("Duplicated private & public key for {},
-        //                 impossible", name);
-        //             return Err(Error::ImpossibleLogic)
-        //         }
-        //     }
-        // }
-        // self.tr
+        result.try_add_peers(&dir_keys, config, &config.peers, None)?;
+        result.finish_routes()?;
         Ok(result)
+    }
+}
+
+impl ConfigsToWrite {
+    fn try_from_config<P: AsRef<Path>>(config: &Config, dir_all: P) 
+        -> Result<Self> 
+    {
+        let configs_parsing = 
+            ConfigsToWriteParsing::try_from_config(config, dir_all)?;
+        let map = 
+            configs_parsing.map.into_iter().map(
+                |(name, config)|
+                    (name, config.0)).collect();
+        Ok(Self { map })
     }
 
     fn try_write<P: AsRef<Path>>(&self, dir_all: P) -> Result<()> {
