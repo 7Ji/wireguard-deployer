@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir, create_dir_all, remove_dir_all, File}, hash::Hash, io::{Read, Write}, iter::once, path::{Path, PathBuf}};
+use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, iter::once, path::Path};
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -208,7 +208,7 @@ impl WireGuardKey {
     }
 
     /// Write this key to file, without encoding
-    fn to_file_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    fn _to_file_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         write_all_checked(
             &mut file_create_checked(path)?, &self.value)
     }
@@ -230,7 +230,7 @@ impl WireGuardKey {
     }
 
     /// Read from file, in which a key is stored as raw un-encoded bytes
-    fn from_file_raw<P: AsRef<Path>>(path: P) -> Result<Self> {
+    fn _from_file_raw<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut value = Self::new_empty_raw();
         read_exact_checked(
             &mut file_open_checked(path)?, &mut value)?;
@@ -238,12 +238,12 @@ impl WireGuardKey {
     }
 
     /// Read from file if it exists, otherwise generate a new one
-    fn from_file_raw_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    fn _from_file_raw_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
         if path.as_ref().exists() {
-            return Self::from_file_raw(path)
+            return Self::_from_file_raw(path)
         }
         let key = Self::new();
-        key.to_file_raw(path)?;
+        key._to_file_raw(path)?;
         Ok(key)
     }
 
@@ -304,16 +304,6 @@ struct PeerConfig {
     children: PeerList
 }
 
-impl PeerConfig {
-    fn get_should_allows<'a>(&'a self) -> Vec<&'a str> {
-        let mut allows = vec![self.ip.as_str()];
-        for allow in self.forward.iter() {
-            allows.push(&allow)
-        }
-        allows
-    }
-}
-
 // fn peer_reachable(peer_name: &String, peer_config: &PeerConfig, endpoint_name: &String, endpoint_config: &PeerConfig) -> bool {
 //     match (&peer_config.reach, &endpoint_config.reach) {
 //         (Some(peer_reach), Some(endpoint_reach)) => peer_reach.contains(endpoint_name) && endpoint_reach.contains(peer_name),
@@ -366,7 +356,7 @@ impl NetDevKeyFile {
     fn base64(&self) -> Result<WireGuardKeyBase64> {
         self.raw.base64()
     }
-    fn base64_string(&self) -> String {
+    fn _base64_string(&self) -> String {
         self.raw.base64_string()
     }
     fn from_dir_keys_or_new(dir_keys: &Path, name: String) -> Result<Self> {
@@ -461,18 +451,6 @@ struct RoutesInfo<'a> {
     routes: RoutesMap<'a>
 }
 
-// fn neighbors_from_peer_list<'a>(peer_name: &str, peer_list: &'a PeerList) -> Neighbors<'a> {
-//     let mut neighbors = Neighbors::new();
-//     for neighbor in peer_list.keys() {
-//         if neighbor != peer_name  {
-//             neighbors.push(neighbor)
-//         }
-//     }
-//     neighbors.sort_unstable();
-//     // neighbors.dedup();
-//     neighbors
-// }
-
 fn vec_string_contains_str(list: &Vec<String>, value: &str) -> bool {
     for existing in list.iter() {
         if existing == value {
@@ -496,7 +474,7 @@ impl<'a> RoutesInfo<'a> {
             routes: Default::default(),
         };
         let (peer_name, peer_config) = peer;
-        routes_info.try_add_from_peer("", peer_config, 0)?;
+        routes_info.try_add_from_self(peer_config)?;
         if let Some(parent_config) = parent_config {
             routes_info.try_add_from_parent(parent_name, parent_config)?
         }
@@ -573,14 +551,6 @@ struct ConfigsToWriteParsing<'a> {
     keys: HashMap<&'a str, (NetDevKeyFile, WireGuardKey)>,
     psks: HashMap<(&'a str, &'a str), NetDevKeyFile>
 }
-
-// fn psk_open_or_read() {
-//     match preshared_keys.get(&key) {
-//         Some(key_file) => netdev_peer.psk = Some(key_file.clone()),
-//         None => {
-//         },
-//     }
-// }
 
 impl<'a> ConfigsToWriteParsing<'a> {
     fn get_psk_or_new(&mut self, dir_keys: &Path, some: &'a str, other: &'a str) -> Result<&NetDevKeyFile> {
@@ -704,35 +674,77 @@ impl<'a> ConfigsToWriteParsing<'a> {
             return Err(Error::DuplicatedRoute)
         }
         loop {
-            let mut updated = false;
-            for (peer_name, (_, routes_info)) in self.map.iter_mut() {
+            let mut new_routes_infos = HashMap::<&str, RoutesMap>::new();
+            for (peer_name, (_, routes_info)) in self.map.iter() {
                 if routes_info.routes.len() == self.route_targets.len() {
                     continue
                 }
+                let mut new_routes_info = RoutesMap::new();
                 for route_target in self.route_targets.iter() {
                     if routes_info.routes.contains_key(route_target) {
                         continue
                     }
                     // Look for route
-                    let mut via = "";
-                    let mut jump = 0;
-                    let mut external = false;
-                    // for (other_name, (_, other_map)) in self.map.iter() {
-                        
-                    // }
-                    // if ! via.is_empty() && jump != 0 {
-                    //     routes_map_try_add(&mut routes_info.map, route_target, via, jump, external)?;
-                    //     updated = true
-                    // }
+                    let mut new_route_info: Option<RouteInfo> = None;
+                    for via in routes_info.neighbors.iter().chain(once(&routes_info.parent)) {
+                        if via.is_empty() {
+                            continue
+                        }
+                        let first_jump = 2;
+                        let peer_routes_info = match self.map.get(via) {
+                            Some((_, routes_info)) => routes_info,
+                            None => continue,
+                        };
+                        if let Some(route_info) = peer_routes_info.routes.get(route_target) {
+                            let jump = route_info.jump + first_jump;
+                            match &new_route_info {
+                                Some(new_route_info_inner) => {
+                                    if new_route_info_inner.jump > jump {
+                                        new_route_info = Some(RouteInfo {
+                                            via,
+                                            jump,
+                                            internal: route_info.internal,
+                                        })
+                                    }
+                                },
+                                None => new_route_info = Some(RouteInfo {
+                                    via,
+                                    jump,
+                                    internal: route_info.internal,
+                                }),
+                            }
+                            break
+                        }
+                    }
+                    if let Some(new_route_info) = new_route_info {
+                        if new_routes_info.insert(route_target, new_route_info).is_some() {
+                            eprintln!("Duplicated route for target '{}'", route_target);
+                            return Err(Error::DuplicatedRoute)
+                        }
+                    }
+                }
+                if ! new_routes_info.is_empty() {
+                    if new_routes_infos.insert(peer_name, new_routes_info).is_some() {
+                        eprintln!("Duplicated route for peer '{}'", peer_name);
+                        return Err(Error::DuplicatedRoute)
+                    }
                 }
             }
-            if ! updated {
+            if new_routes_infos.is_empty() {
                 break
             }
+            for (update_peer_name, new_routes) in new_routes_infos.iter_mut() {
+                match self.map.get_mut(update_peer_name) {
+                    Some((_, routes_map)) => routes_map.routes.append(new_routes),
+                    None => {
+                        eprintln!("Could not find peer {} to update route, impossible", update_peer_name);
+                        return Err(Error::ImpossibleLogic)
+                    },
+                }
+            }
         }
-        for (peer_name, (composite_config, 
-            routes_info)) in 
-            self.map.iter_mut() 
+        for (composite_config, routes_info) in 
+            self.map.values_mut() 
         {
             // let mut peers_map = HashMap::new();
             for (route_target, route_info) in routes_info.routes.iter() {
@@ -807,7 +819,9 @@ impl<'a> ConfigsToWrite<'a> {
             buffer_add_key_file!(netdev.key);
             buffer.push('\n');
             for peer in netdev.peers.iter() {
-                buffer.push_str("\n[WireGuardPeer]\nPublicKey=");
+                buffer.push_str("\n[WireGuardPeer] # ");
+                buffer.push_str(&peer.name);
+                buffer.push_str("\nPublicKey=");
                 buffer.push_str(&peer.pubkey.base64_string());
                 if let Some(psk) = &peer.psk {
                     buffer.push_str("\nPreSharedKeyFile=/etc/systemd/network/keys/wg/");
