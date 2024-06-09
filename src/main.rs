@@ -326,6 +326,8 @@ struct Config {
     /// The .network unit name, without `.network` suffix, (the suffix would be 
     /// appended automatically), e.g. `40-wireguard`
     network: String,
+    /// The network subnet mask,
+    mask: u8,
     /// The interface name, e.g. `wg0`
     iface: String,
     /// The list of peers
@@ -401,6 +403,7 @@ struct NetWorkConfig<'a> {
 #[derive(Debug, Default)]
 struct CompositeConfig<'a> {
     iface: &'a str,
+    mask: u8,
     netdev: NetDevConfig<'a>,
     network: NetWorkConfig<'a>
 }
@@ -609,6 +612,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
             };
         }
         let composite = CompositeConfig {
+            mask: config.mask,
             iface: str_non_empty_or_global!(iface),
             netdev: NetDevConfig {
                 name: str_non_empty_or_global!(netdev),
@@ -841,7 +845,7 @@ impl WriterBuffer {
     }
 
     fn new_tar_header_directory_keys(&self) -> Result<tar::Header> {
-        self.new_tar_header_directory("systemd-network", 0o640)
+        self.new_tar_header_directory("systemd-network", 0o750)
     }
 
     fn new_tar_header_file(&self, group: &str, mode: u32, size: usize) -> Result<tar::Header> {
@@ -930,12 +934,12 @@ impl<'a> ConfigsToWrite<'a> {
             buffer.add_key_file(&netdev.key)?;
             buffer.push('\n');
             for peer in netdev.peers.iter() {
-                buffer.push_str("\n[WireGuardPeer] # ");
+                buffer.push_str("\n# ");
                 buffer.push_str(&peer.name);
-                buffer.push_str("\nPublicKey=");
+                buffer.push_str("\n[WireGuardPeer]\nPublicKey=");
                 buffer.push_str(&peer.pubkey.base64_string());
                 if let Some(psk) = &peer.psk {
-                    buffer.push_str("\nPreSharedKeyFile=/etc/systemd/network/keys/wg/");
+                    buffer.push_str("\nPresharedKeyFile=/etc/systemd/network/keys/wg/");
                     buffer.add_key_file(psk)?;
                 }
                 if ! peer.endpoint.is_empty() {
@@ -957,10 +961,14 @@ impl<'a> ConfigsToWrite<'a> {
             buffer.push_str(&config.iface);
             buffer.push_str("\n\n[Network]\nAddress=");
             buffer.push_str(&network.address);
+            buffer.push('/');
+            buffer.push_str(&format!("{}", &config.mask));
             for route in network.routes.iter() {
                 buffer.push_str("\n\n[Route]\nDestination=");
                 buffer.push_str(route);
-                buffer.push_str("\nScope=link");
+                if ! route.contains(":") {
+                    buffer.push_str("\nScope=link")
+                }
             }
             buffer.push('\n');
             buffer.finish_config(&format!("{}.network", network.name))?;
