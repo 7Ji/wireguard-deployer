@@ -484,10 +484,9 @@ impl<'a> RoutesInfo<'a> {
             routes_info.try_add_from_parent(parent_name, parent_config)?
         }
         for (neighbor_name, neighbor_config) in neighbors.iter() {
-            if neighbor_name == peer_name {
-                continue
-            }
-            if ! can_neighbors_direct(peer, (neighbor_name, neighbor_config))  {
+            if neighbor_name == peer_name ||
+             ! can_neighbors_direct(peer, (neighbor_name, neighbor_config))  
+            {
                 continue
             }
             routes_info.try_add_from_neighbor(neighbor_name, neighbor_config)?
@@ -616,37 +615,33 @@ impl<'a> ConfigsToWriteParsing<'a> {
                 key: self.get_key_or_new(dir_keys, peer_name)?.0.clone(),
                 peers: {
                     let mut peers = Vec::new();
+                    macro_rules! add_peer {
+                        ($peer_name: ident, $peer_config: ident) => {
+                            peers.push(NetDevPeer {
+                                name: $peer_name,
+                                allowed: Default::default(),
+                                pubkey: self.get_key_or_new(dir_keys, $peer_name)?.1.clone(),
+                                endpoint: &$peer_config.endpoint,
+                                psk: if config.psk {
+                                    Some(self.get_psk_or_new(dir_keys, peer_name, $peer_name)?.clone())
+                                } else {
+                                    None
+                                },
+                            })
+                        };
+                    }
                     if let Some((parent_name, parent_config)) = parent {
-                        peers.push(NetDevPeer {
-                            name: parent_name,
-                            allowed: Default::default(),
-                            pubkey: self.get_key_or_new(dir_keys, parent_name)?.1.clone(),
-                            endpoint: &parent_config.endpoint,
-                            psk: if config.psk {
-                                Some(self.get_psk_or_new(dir_keys, peer_name, parent_name)?.clone())
-                            } else {
-                                None
-                            },
-                        })
+                        add_peer!(parent_name, parent_config)
                     }
                     for (neighbor_name, neighbor_config) in neighbors.iter() {
-                        if neighbor_name == peer_name {
+                        if neighbor_name == peer_name ||
+                         ! can_neighbors_direct(peer, (neighbor_name, neighbor_config)) {
                             continue
                         }
-                        if ! can_neighbors_direct(peer, (neighbor_name, neighbor_config)) {
-                            continue
-                        }
-                        peers.push(NetDevPeer {
-                            name: neighbor_name,
-                            allowed: Default::default(),
-                            pubkey: self.get_key_or_new(dir_keys, neighbor_name)?.1.clone(),
-                            endpoint: &neighbor_config.endpoint,
-                            psk: if config.psk {
-                                Some(self.get_psk_or_new(dir_keys, peer_name, neighbor_name)?.clone())
-                            } else {
-                                None
-                            },
-                        })
+                        add_peer!(neighbor_name, neighbor_config)
+                    }
+                    for (child_name, child_config) in peer_config.children.iter() {
+                        add_peer!(child_name, child_config)
                     }
                     peers
                 },
