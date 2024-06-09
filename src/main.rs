@@ -707,11 +707,15 @@ impl<'a> ConfigsToWriteParsing<'a> {
                     }
                     // Look for route
                     let mut new_route_info: Option<RouteInfo> = None;
-                    for via in routes_info.neighbors.iter().chain(once(&routes_info.parent)) {
+                    for (via, is_parent) in routes_info.neighbors.iter().map(|neighbor|(neighbor, false)).chain(once((&routes_info.parent, true))) {
                         if via.is_empty() {
                             continue
                         }
-                        let first_jump = 2;
+                        let first_jump = if is_parent {
+                            3
+                        } else {
+                            2
+                        };
                         let peer_routes_info = match self.map.get(via) {
                             Some((_, routes_info)) => routes_info,
                             None => continue,
