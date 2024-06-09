@@ -50,7 +50,7 @@ peers:
         #    - Specially, if set to empty, this peer is considierd unable to connect to any other peer (other than parent)
         # In any case, to create route, two peers must be considered able to connect to each other
         # In any case, peers in different levels can neven connect to each other
-        direct: [hk1]
+        direct: []
         # Unlimited layers of recursive children are supported
         children:
           v7j:
