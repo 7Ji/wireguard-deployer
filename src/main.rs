@@ -263,6 +263,47 @@ impl WireGuardKey {
 type PeerList = BTreeMap<String, PeerConfig>;
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PeerEndpointConfig {
+    Plain (String),
+    Multi {
+        #[serde(default)]
+        parent: String,
+        #[serde(default)]
+        neighbor: String,
+        #[serde(default)]
+        child: String
+    }
+}
+
+impl Default for PeerEndpointConfig {
+    fn default() -> Self {
+        Self::Plain(Default::default())
+    }
+}
+
+impl PeerEndpointConfig {
+    fn parent(&self) -> &str {
+        match self {
+            PeerEndpointConfig::Plain(endpoint) => endpoint,
+            PeerEndpointConfig::Multi { parent, neighbor: _, child: _ } => parent,
+        }
+    }
+    fn neighbor(&self) -> &str {
+        match self {
+            PeerEndpointConfig::Plain(endpoint) => endpoint,
+            PeerEndpointConfig::Multi { parent: _, neighbor, child: _ } => neighbor,
+        }
+    }
+    fn child(&self) -> &str {
+        match self {
+            PeerEndpointConfig::Plain(endpoint) => endpoint,
+            PeerEndpointConfig::Multi { parent: _, neighbor: _, child } => child,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 /// Config of a peer
 struct PeerConfig {
     /// The IP of the peer inside this network
@@ -284,7 +325,7 @@ struct PeerConfig {
     /// The endpoint, i.e. the IP outside this network that other peers can 
     /// connect accordingly, usually a host + port pair
     #[serde(default)]
-    endpoint: String,
+    endpoint: PeerEndpointConfig,
     /// IP ranges outside of the main wireguard range that should be forwarded
     /// into the wireguard range
     #[serde(default)]
@@ -619,12 +660,12 @@ impl<'a> ConfigsToWriteParsing<'a> {
                 peers: {
                     let mut peers = Vec::new();
                     macro_rules! add_peer {
-                        ($peer_name: ident, $peer_config: ident) => {
+                        ($peer_name: ident, $peer_config: ident, $peer_endpoint: expr) => {
                             peers.push(NetDevPeer {
                                 name: $peer_name,
                                 allowed: Default::default(),
                                 pubkey: self.get_key_or_new(dir_keys, $peer_name)?.1.clone(),
-                                endpoint: &$peer_config.endpoint,
+                                endpoint: &$peer_endpoint,
                                 psk: if config.psk {
                                     Some(self.get_psk_or_new(dir_keys, peer_name, $peer_name)?.clone())
                                 } else {
@@ -634,17 +675,17 @@ impl<'a> ConfigsToWriteParsing<'a> {
                         };
                     }
                     if let Some((parent_name, parent_config)) = parent {
-                        add_peer!(parent_name, parent_config)
+                        add_peer!(parent_name, parent_config, parent_config.endpoint.child())
                     }
                     for (neighbor_name, neighbor_config) in neighbors.iter() {
                         if neighbor_name == peer_name ||
                          ! can_neighbors_direct(peer, (neighbor_name, neighbor_config)) {
                             continue
                         }
-                        add_peer!(neighbor_name, neighbor_config)
+                        add_peer!(neighbor_name, neighbor_config, neighbor_config.endpoint.neighbor())
                     }
                     for (child_name, child_config) in peer_config.children.iter() {
-                        add_peer!(child_name, child_config)
+                        add_peer!(child_name, child_config, child_config.endpoint.parent())
                     }
                     peers
                 },

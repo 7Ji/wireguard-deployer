@@ -14,7 +14,8 @@ mask: 24
 peers:
   fuo:
     ip: 192.168.77.2
-    endpoint: fuo.fuckblizzard.com:51820
+    endpoint: 
+      neighbor: fuo.fuckblizzard.com:51820
     forward:
       - 192.168.67.0/24
       - fd60:c3e0:a2d7::/48
@@ -29,7 +30,15 @@ peers:
   # The below peers assemble a star network in which all traffic need to go through hk1
   hk1:
     ip: 192.168.77.96
-    endpoint: hk1.fuckblizzard.com:51820
+    # Alternatively, a peer can have different endpoint depending on whether its
+    # parent, neighbor or child want to connect to it
+    endpoint:
+      # If hk1 has a parent, then its parent shall connect via this endpoint
+      parent: hk1.fuckblizzard.com:51820
+      # hk1's neighbor shall connect to it via this endpoint
+      neighbor: hk1.fuckblizzard.com:51820
+      # hk1's child shall connect to it via this endpoint
+      child: hk1.lan:51820
     children:
       rz5:
         ip: 192.168.77.97
@@ -42,6 +51,17 @@ peers:
         # In any case, to create route, two peers must be considered able to connect to each other
         # In any case, peers in different levels can neven connect to each other
         direct: [hk1]
+        # Unlimited layers of recursive children are supported
+        children:
+          v7j:
+            ip: 192.168.77.201
+            endpoint: v7j.lan:51820
+          vbt:
+            ip: 192.168.77.202
+            endpoint: vbt.lan:51820
+          vdb:
+            ip: 192.168.77.203
+            endpoint: vdb.lan:51820
       l3a:
         ip: 192.168.77.98
         endpoint: l3a.lan:51820
