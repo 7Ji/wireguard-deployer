@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, iter::once, path::Path};
+use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, iter::once, path::{Path, PathBuf}};
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -17,6 +17,7 @@ enum Error {
     DuplicatedRoute,
     ImpossibleLogic,
     IoError (String),
+    // TarError (String),
     YAMLError (String),
 }
 
@@ -54,6 +55,7 @@ macro_rules! impl_from_error_display {
 impl_from_error_display!(std::io::Error, IoError);
 impl_from_error_display!(serde_yaml::Error, YAMLError);
 impl_from_error_display!(base64::DecodeError, Base64DecodeError);
+// impl_from_error_display!(tar::)
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -797,6 +799,104 @@ impl<'a> ConfigsToWriteParsing<'a> {
     }
 }
 
+struct WriterBuffer {
+    buffer: String,
+    tar: tar::Builder<File>,
+    mtime: u64,
+    dir_config: PathBuf,
+    dir_keys: PathBuf,
+}
+
+impl WriterBuffer {
+    fn new(dir_configs: &Path, name: &str, mtime: u64) -> Result<Self> {
+        let dir_config = dir_configs.join(name);
+        let dir_keys = dir_config.join("keys/wg");
+        create_dir_all_checked(&dir_keys)?;
+        let path_tar = dir_configs.join(format!("{}.tar", name));
+        let file_tar = file_create_checked(&path_tar)?;
+        let tar = tar::Builder::new(file_tar);
+        let mut buffer = Self {
+            buffer: String::new(),
+            tar,
+            mtime,
+            dir_config,
+            dir_keys,
+        };
+        let mut header = buffer.new_tar_header_directory_keys()?;
+        buffer.tar.append_data(&mut header, "keys", std::io::empty())?;
+        buffer.tar.append_data(&mut header, "keys/wg", std::io::empty())?;
+        Ok(buffer)
+    }
+
+    fn new_tar_header(&self, group: &str, mode: u32, folder: bool, size: usize) -> Result<tar::Header> {
+        let mut header = tar::Header::new_gnu();
+        header.set_username("root")?;
+        header.set_groupname(group)?;
+        header.set_mode(mode);
+        header.set_mtime(self.mtime);
+        header.set_size(size as u64);
+        if folder {
+            header.set_entry_type(tar::EntryType::Directory);
+        }
+        Ok(header)
+    }
+
+    fn new_tar_header_directory(&self, group: &str, mode: u32) -> Result<tar::Header> {
+        self.new_tar_header(group, mode, true, 0)
+    }
+
+    fn new_tar_header_directory_keys(&self) -> Result<tar::Header> {
+        self.new_tar_header_directory("systemd-network", 0o640)
+    }
+
+    fn new_tar_header_file(&self, group: &str, mode: u32, size: usize) -> Result<tar::Header> {
+        self.new_tar_header(group, mode, false, size)
+    }
+
+    fn new_tar_header_file_key(&self) -> Result<tar::Header> {
+        self.new_tar_header_file("systemd-network", 0o640, WireGuardKey::LEN_BASE64)
+    }
+
+    fn new_tar_header_file_config(&self, size: usize) -> Result<tar::Header> {
+        self.new_tar_header_file("root", 0o644, size)
+    }
+
+    fn add_key_file(&mut self, key_file: &NetDevKeyFile) -> Result<()> {
+        self.buffer.push_str(&key_file.name);
+        let key_base64 = key_file.base64()?;
+        content_to_file(&key_base64, self.dir_keys.join(&key_file.name))?;
+        let mut header = self.new_tar_header_file_key()?;
+        self.tar.append_data(&mut header, format!("keys/wg/{}", &key_file.name), key_base64.as_slice())?;
+        Ok(())
+    }
+
+    fn finish_config(&mut self, name: &str) -> Result<()> {
+        let bytes = self.buffer.as_bytes();
+        content_to_file(bytes, 
+            self.dir_config.join(name))?;
+        let mut header = self.new_tar_header_file_config(bytes.len())?;
+        self.tar.append_data(&mut header, name, bytes)?;
+        Ok(())
+    }
+
+    fn finish_tar(&mut self) -> Result<()> {
+        self.tar.finish()?;
+        Ok(())
+    }
+
+    fn push_str(&mut self, str: &str) {
+        self.buffer.push_str(str)
+    }
+
+    fn push(&mut self, char: char) {
+        self.buffer.push(char)
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear()
+    }
+}
+
 impl<'a> ConfigsToWrite<'a> {
     fn try_from_config<P: AsRef<Path>>(config: &'a Config, dir_all: P) 
         -> Result<Self> 
@@ -815,29 +915,24 @@ impl<'a> ConfigsToWrite<'a> {
         let _ = remove_dir_all(&dir_configs);
         create_dir_all_checked(&dir_configs)?;
         // create_dir_all_checked(dir_keys)?;
-        let mut buffer = String::new();
+        let mtime = match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(mtime) => mtime.as_secs(),
+            Err(e) => {
+                eprintln!("Current time earlier than UNIX Epoch: {}, impossible", e);
+                return Err(Error::ImpossibleLogic)
+            },
+        };
         for (name, config) in self.map.iter() {
-            let dir_config = dir_configs.join(name);
-            let dir_keys = dir_config.join("keys/wg");
-            create_dir_all_checked(&dir_keys)?;
-
+            let mut buffer = WriterBuffer::new(&dir_configs, name, mtime)?;
             let netdev = &config.netdev;
-            buffer.clear();
             buffer.push_str("[NetDev]\nName=");
-            macro_rules! buffer_add_key_file {
-                ($key_file: expr) => {
-                    buffer.push_str(&$key_file.name);
-                    content_to_file(&$key_file.base64()?, 
-                        &dir_keys.join(&$key_file.name))?;
-                };
-            }
             buffer.push_str(&config.iface);
             buffer.push_str("\n\
                 Kind=wireguard\n\n\
                 [WireGuard]\n\
                 ListenPort=51820\n\
                 PrivateKeyFile=/etc/systemd/network/keys/wg/");
-            buffer_add_key_file!(netdev.key);
+            buffer.add_key_file(&netdev.key)?;
             buffer.push('\n');
             for peer in netdev.peers.iter() {
                 buffer.push_str("\n[WireGuardPeer] # ");
@@ -846,7 +941,7 @@ impl<'a> ConfigsToWrite<'a> {
                 buffer.push_str(&peer.pubkey.base64_string());
                 if let Some(psk) = &peer.psk {
                     buffer.push_str("\nPreSharedKeyFile=/etc/systemd/network/keys/wg/");
-                    buffer_add_key_file!(psk);
+                    buffer.add_key_file(psk)?;
                 }
                 if ! peer.endpoint.is_empty() {
                     buffer.push_str("\nEndpoint=");
@@ -858,9 +953,8 @@ impl<'a> ConfigsToWrite<'a> {
                 }
                 buffer.push('\n');
             }
-            content_to_file(buffer.as_bytes(), 
-                &dir_config.join(
-                    format!("{}.netdev", &netdev.name)))?;
+            buffer.finish_config(&format!("{}.netdev", &netdev.name))?;
+            buffer.clear();
             
             let network = &config.network;
             buffer.clear();
@@ -874,9 +968,8 @@ impl<'a> ConfigsToWrite<'a> {
                 buffer.push_str("\nScope=link");
             }
             buffer.push('\n');
-            content_to_file(buffer.as_bytes(),
-                &dir_config.join(
-                    format!("{}.network", network.name)))?;
+            buffer.finish_config(&format!("{}.network", network.name))?;
+            buffer.finish_tar()?;
         }
         Ok(())
     }
