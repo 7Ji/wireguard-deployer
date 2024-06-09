@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir, create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}};
+use std::{borrow::Cow, cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir, create_dir_all, remove_dir_all, File}, hash::Hash, io::{Read, Write}, iter::once, path::{Path, PathBuf}};
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -135,11 +135,10 @@ type WireGuardKeyBase64 = [u8; WireGuardKey::LEN_BASE64];
 
 /// A WireGuard-compatible key, does not differentiate public or private by 
 /// itself, user should take care of that
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct WireGuardKey {
     value: WireGuardKeyRaw
 }
-
 
 impl WireGuardKey {
     /// The length of a WireGuard key, raw byte length
@@ -191,7 +190,10 @@ impl WireGuardKey {
 
     /// Encode this key to base64 string
     fn base64_string(&self) -> String {
-        Self::BASE64_ENGINE.encode(self.value)
+        let mut value = String::new();
+        value.reserve_exact(Self::LEN_BASE64);
+        Self::BASE64_ENGINE.encode_string(self.value, &mut value);
+        value
     }
 
     /// Get the corresponding public key, assuming this is a private key.
@@ -302,6 +304,16 @@ struct PeerConfig {
     children: PeerList
 }
 
+impl PeerConfig {
+    fn get_should_allows<'a>(&'a self) -> Vec<&'a str> {
+        let mut allows = vec![self.ip.as_str()];
+        for allow in self.forward.iter() {
+            allows.push(&allow)
+        }
+        allows
+    }
+}
+
 // fn peer_reachable(peer_name: &String, peer_config: &PeerConfig, endpoint_name: &String, endpoint_config: &PeerConfig) -> bool {
 //     match (&peer_config.reach, &endpoint_config.reach) {
 //         (Some(peer_reach), Some(endpoint_reach)) => peer_reach.contains(endpoint_name) && endpoint_reach.contains(peer_name),
@@ -341,156 +353,154 @@ impl Config {
 
 
 /// A wireguard key in netdev that shall be stored in a file
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct NetDevKeyFile {
-    /// The backing key
-    key: WireGuardKey,
+    /// The backing raw key
+    raw: WireGuardKey,
     /// The file name this key shall be stored, inside the folder
     /// `/etc/systemd/network/keys/wg`
-    filename: String,
+    name: String,
+}
+
+impl NetDevKeyFile {
+    fn base64(&self) -> Result<WireGuardKeyBase64> {
+        self.raw.base64()
+    }
+    fn base64_string(&self) -> String {
+        self.raw.base64_string()
+    }
+    fn from_dir_keys_or_new(dir_keys: &Path, name: String) -> Result<Self> {
+        let raw = WireGuardKey::from_file_base64_or_new(dir_keys.join(&name))?;
+        Ok(NetDevKeyFile { raw, name })
+    }
+    fn pubkey(&self) -> WireGuardKey {
+        self.raw.pubkey()
+    }
+    fn from_dir_keys_with_pubkey_or_new(dir_keys: &Path, name: String) -> Result<(Self, WireGuardKey)> {
+        let key_file = Self::from_dir_keys_or_new(dir_keys, name)?;
+        let pubkey = key_file.pubkey();
+        Ok((key_file, pubkey))
+    }
 }
 
 /// A wireguard peer in a netdev
 #[derive(Debug, Default)]
-struct NetDevPeer {
+struct NetDevPeer<'a> {
+    name: &'a str,
     /// The incoming IP ranges this is allowed to access, also hinting whether
     /// traffic should go through this peer if a corresponding range is found
-    allowed: Vec<String>,
+    allowed: Vec<&'a str>,
     /// The public key of this peer
     pubkey: WireGuardKey,
     /// The endpoint
-    endpoint: String,
+    endpoint: &'a str,
     /// The pre-shared key between the peer
     psk: Option<NetDevKeyFile>,
 }
 
 /// A .netdev config
 #[derive(Debug, Default)]
-struct NetDevConfig {
-    name: String,
+struct NetDevConfig<'a> {
+    name: &'a str,
     /// The private key of the netdev
     key: NetDevKeyFile,
     /// The peers
-    peers: Vec<NetDevPeer>
+    peers: Vec<NetDevPeer<'a>>
 }
 
 /// A .network config
 #[derive(Debug, Default)]
-struct NetWorkConfig {
-    name: String,
-    address: String,
-    routes: Vec<String>,
+struct NetWorkConfig<'a> {
+    name: &'a str,
+    address: &'a str,
+    routes: Vec<&'a str>,
 }
 
 /// A .netdev + .network config
 #[derive(Debug, Default)]
-struct CompositeConfig {
-    iface: String,
-    netdev: NetDevConfig,
-    network: NetWorkConfig
+struct CompositeConfig<'a> {
+    iface: &'a str,
+    netdev: NetDevConfig<'a>,
+    network: NetWorkConfig<'a>
 }
 
 #[derive(Debug, Default)]
-struct ConfigsToWrite {
-    map: BTreeMap<String, CompositeConfig>
+struct ConfigsToWrite<'a> {
+    map: BTreeMap<&'a str, CompositeConfig<'a>>
 }
 
 #[derive(Debug, Default)]
-struct RouteInfo {
-    via: String,
+struct RouteInfo<'a> {
+    via: &'a str,
+    /// How many pseudo jumps away, this is not the actual jump.
+    /// 
+    /// Price of non-wireguard traffic is low:
+    /// - Self: 0
+    /// - Forward: 1
+    /// 
+    /// Price of in-wireguard traffic is higher:
+    /// - Peer to neighbor: 2
+    /// - Peer to parent: 3
+    /// - Parent to child: 3
+    /// 
+    /// This is to prefer direct neighbor connection over parent-forwarding
     jump: usize, // special value 0 for self
-    external: bool
+
+    /// WireGuard internal IP
+    internal: bool
 }
 
-// const LOCAL_ROUTE: RouteInfo = RouteInfo { via: String::new(), jump: 0 };
-
-type RoutesMap = BTreeMap<String, RouteInfo>;
-
-fn routes_map_try_add(routes_map: &mut RoutesMap, 
-    target: &str, via: &str, jump: usize, external: bool
-) -> Result<()> 
-{
-    let via = via.into();
-    let route_info = RouteInfo { via, jump, external };
-    if routes_map.insert(target.into(), route_info).is_some() {
-        Err(Error::DuplicatedRoute)
-    } else {
-        Ok(())
-    }
-}
-
-fn routes_map_try_add_from_peer(
-    routes_map: &mut RoutesMap, peer_name: &str, peer_config: &PeerConfig
-) -> Result<()> 
-{
-    routes_map_try_add(routes_map, 
-        &peer_config.ip, peer_name, 1, false)?;
-    for forward in peer_config.forward.iter() {
-        routes_map_try_add(routes_map, 
-            &forward, peer_name, 1, true)?;
-    }
-    Ok(())
-}
+type PeerWithConfig<'a> = (&'a str, &'a PeerConfig);
+type RoutesMap<'a> = BTreeMap<&'a str, RouteInfo<'a>>;
+type Neighbors<'a> = Vec<&'a str>;
 
 #[derive(Debug, Default)]
-struct ConfigsToWriteParsing {
-    map: BTreeMap<String, (CompositeConfig, RoutesMap)>,
-    targets: Vec<String>,
+struct RoutesInfo<'a> {
+    parent: &'a str,
+    neighbors: Neighbors<'a>,
+    routes: RoutesMap<'a>
 }
 
-impl ConfigsToWriteParsing {
-    fn try_add_peer(&mut self, dir_keys: &Path,
-        config: &Config, peer_name: &String, peer_config: &PeerConfig,
-        neighbors: &PeerList, parent: Option<(&str, &PeerConfig)>
-    ) -> Result<()> 
+// fn neighbors_from_peer_list<'a>(peer_name: &str, peer_list: &'a PeerList) -> Neighbors<'a> {
+//     let mut neighbors = Neighbors::new();
+//     for neighbor in peer_list.keys() {
+//         if neighbor != peer_name  {
+//             neighbors.push(neighbor)
+//         }
+//     }
+//     neighbors.sort_unstable();
+//     // neighbors.dedup();
+//     neighbors
+// }
+
+fn vec_string_contains_str(list: &Vec<String>, value: &str) -> bool {
+    for existing in list.iter() {
+        if existing == value {
+            return true
+        }
+    }
+    false
+}
+
+impl<'a> RoutesInfo<'a> {
+    fn try_new(peer: PeerWithConfig<'a>, parent: Option<PeerWithConfig<'a>>, neighbors: &'a PeerList
+    ) -> Result<Self>
     {
-        macro_rules! string_non_empty_or_global {
-            ($name: ident) => {
-                if peer_config.$name.is_empty() {
-                    config.$name.clone()
-                } else {
-                    peer_config.$name.clone()
-                }
-            };
-        }
-        let composite = CompositeConfig {
-            iface: string_non_empty_or_global!(iface),
-            netdev: NetDevConfig {
-                name: string_non_empty_or_global!(netdev),
-                key: {
-                    let filename = format!("private-{}", peer_name);
-                    let key = 
-                        WireGuardKey::from_file_base64_or_new(
-                            &dir_keys.join(&filename))?;
-                    NetDevKeyFile { key, filename }
-                },
-                peers: Default::default(),
-            },
-            network: NetWorkConfig {
-                name: string_non_empty_or_global!(network),
-                address: peer_config.ip.clone(),
-                routes: Default::default(),
-            },
+        let (parent_name, parent_config) = match parent {
+            Some((parent_name, parent_config)) => (parent_name, Some(parent_config)),
+            None => ("", None),
         };
-        self.targets.push(peer_config.ip.clone());
-        for forward in peer_config.forward.iter() {
-            self.targets.push(forward.clone())
+        let mut routes_info = RoutesInfo {
+            parent: &parent_name,
+            neighbors: Default::default(),
+            routes: Default::default(),
+        };
+        let (peer_name, peer_config) = peer;
+        routes_info.try_add_from_peer("", peer_config, 0)?;
+        if let Some(parent_config) = parent_config {
+            routes_info.try_add_from_parent(parent_name, parent_config)?
         }
-        let mut routes_map = RoutesMap::default();
-        routes_map_try_add(&mut routes_map, 
-            &peer_config.ip, "", 0, false)?;
-        for forward in peer_config.forward.iter() {
-            routes_map_try_add(&mut routes_map, 
-                &forward, "", 0, true)?;
-        }
-        if let Some((parent_name, parent_config)) = parent {
-            routes_map_try_add_from_peer(&mut routes_map, parent_name, parent_config)?;
-        }
-        // Parent
-        // Neighbors
-        for (neighbor_name, neighbor_config) 
-            in neighbors.iter() 
-        {
+        for (neighbor_name, neighbor_config) in neighbors .iter() {
             if neighbor_name == peer_name {
                 continue
             }
@@ -500,18 +510,171 @@ impl ConfigsToWriteParsing {
                 }
             }
             if let Some(direct) = &neighbor_config.direct {
-                if ! direct.contains(peer_name) {
+                if ! vec_string_contains_str(direct, peer_name) {
                     continue
                 }
             }
-            routes_map_try_add_from_peer(&mut routes_map, 
-                &neighbor_name, neighbor_config)?
+            routes_info.try_add_from_neighbor(neighbor_name, neighbor_config)?
         }
+        routes_info.neighbors.sort_unstable();
+        Ok(routes_info)
+    }
+
+    fn try_add(&mut self, target: &'a str, via: &'a str, jump: usize, internal: bool) -> Result<()> 
+    {
+        let route_info = RouteInfo { via, jump, internal };
+        if self.routes.insert(target, route_info).is_some() {
+            eprintln!("Duplicate route target '{}' for peer, please check your config to make sure all IPs, forwards are unique!", target);
+            Err(Error::DuplicatedRoute)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn try_add_from_peer(
+        &mut self, peer_name: &'a str, peer_config: &'a PeerConfig, jump: usize
+    ) -> Result<()> 
+    {
+        self.try_add(&peer_config.ip, peer_name,  jump, true)?;
+        for forward in peer_config.forward.iter() {
+            self.try_add(&forward, peer_name, jump + 1, false)?;
+        }
+        Ok(())
+    }
+
+    fn try_add_from_self(
+        &mut self, peer_config: &'a PeerConfig
+    ) -> Result<()> 
+    {
+        self.try_add_from_peer("", peer_config, 0)
+    }
+
+    fn try_add_from_parent(
+        &mut self, peer_name: &'a str, peer_config: &'a PeerConfig
+    ) -> Result<()> 
+    {
+        self.try_add_from_peer(peer_name, peer_config, 3)
+    }
+
+    fn try_add_from_neighbor(
+        &mut self, peer_name: &'a str, peer_config: &'a PeerConfig
+    ) -> Result<()> 
+    {
+        self.neighbors.push(peer_name);
+        self.try_add_from_peer(peer_name, peer_config, 2)
+    }
+}
+
+
+#[derive(Debug, Default)]
+struct ConfigsToWriteParsing<'a> {
+    map: BTreeMap<&'a str, (CompositeConfig<'a>, RoutesInfo<'a>)>,
+    route_targets: Vec<&'a str>,
+    keys: HashMap<&'a str, (NetDevKeyFile, WireGuardKey)>,
+    psks: HashMap<(&'a str, &'a str), NetDevKeyFile>
+}
+
+// fn psk_open_or_read() {
+//     match preshared_keys.get(&key) {
+//         Some(key_file) => netdev_peer.psk = Some(key_file.clone()),
+//         None => {
+//         },
+//     }
+// }
+
+impl<'a> ConfigsToWriteParsing<'a> {
+    fn get_psk_or_new(&mut self, dir_keys: &Path, some: &'a str, other: &'a str) -> Result<&NetDevKeyFile> {
+        if some.cmp(other) == Ordering::Less {
+            self.get_psk_or_new_sorted(dir_keys, some, other)
+        } else {
+            self.get_psk_or_new_sorted(dir_keys, other, some)
+        }
+    }
+
+    fn get_psk_or_new_sorted(&mut self, dir_keys: &Path, some: &'a str, other: &'a str) -> Result<&NetDevKeyFile> {
+        match self.psks.entry((some, other)) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) => 
+                Ok(entry.insert(NetDevKeyFile::from_dir_keys_or_new(dir_keys, format!("pre-shared-{}-{}", some, other))?)),
+        }
+    }
+    
+    fn get_key_or_new(&mut self, dir_keys: &Path, peer: &'a str) -> Result<&(NetDevKeyFile, WireGuardKey)> 
+    {
+        match self.keys.entry(peer) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) =>
+                Ok(entry.insert(NetDevKeyFile::from_dir_keys_with_pubkey_or_new(dir_keys, format!("private-{}", peer))?)),
+        }
+    }
+
+    fn try_add_peer(&mut self, dir_keys: &Path,
+        config: &'a Config, peer: PeerWithConfig<'a>,
+        neighbors: &'a PeerList, parent: Option<PeerWithConfig<'a>>
+    ) -> Result<()> 
+    {
+        let (peer_name, peer_config) = peer;
+        macro_rules! str_non_empty_or_global {
+            ($name: ident) => {
+                if peer_config.$name.is_empty() {
+                    &config.$name
+                } else {
+                    &peer_config.$name
+                }
+            };
+        }
+        let composite = CompositeConfig {
+            iface: str_non_empty_or_global!(iface),
+            netdev: NetDevConfig {
+                name: str_non_empty_or_global!(netdev),
+                key: self.get_key_or_new(dir_keys, peer_name)?.0.clone(),
+                peers: {
+                    let mut peers = Vec::new();
+                    if let Some((parent_name, parent_config)) = parent {
+                        peers.push(NetDevPeer {
+                            name: parent_name,
+                            allowed: Default::default(),
+                            pubkey: self.get_key_or_new(dir_keys, parent_name)?.1.clone(),
+                            endpoint: &parent_config.endpoint,
+                            psk: if config.psk {
+                                Some(self.get_psk_or_new(dir_keys, peer_name, parent_name)?.clone())
+                            } else {
+                                None
+                            },
+                        })
+                    }
+                    for (neighbor_name, neighbor_config) in neighbors.iter() {
+                        peers.push(NetDevPeer {
+                            name: neighbor_name,
+                            allowed: Default::default(),
+                            pubkey: self.get_key_or_new(dir_keys, neighbor_name)?.1.clone(),
+                            endpoint: &neighbor_config.endpoint,
+                            psk: if config.psk {
+                                Some(self.get_psk_or_new(dir_keys, peer_name, neighbor_name)?.clone())
+                            } else {
+                                None
+                            },
+                        })
+                    }
+                    peers
+                },
+            },
+            network: NetWorkConfig {
+                name: str_non_empty_or_global!(network),
+                address: &peer_config.ip,
+                routes: Default::default(),
+            },
+        };
+        self.route_targets.push(&peer_config.ip);
+        for forward in peer_config.forward.iter() {
+            self.route_targets.push(&forward)
+        }
+        let routes_info = RoutesInfo::try_new(peer, parent, neighbors)?;
         match self.map.insert(
-            peer_name.to_string(), (composite, routes_map)
+            &peer_name, (composite, routes_info)
         ) {
             Some(_) => {
-                eprintln!("Duplicated peer {}, impossible", peer_name);
+                eprintln!("Duplicated peer {}, please check your config", peer_name);
                 Err(Error::ImpossibleLogic)
             },
             None => Ok(()),
@@ -519,13 +682,13 @@ impl ConfigsToWriteParsing {
     }
 
     fn try_add_peers(&mut self, 
-        dir_keys: &Path, config: &Config, peers: &PeerList,
-        parent: Option<(&str, &PeerConfig)>
+        dir_keys: &Path, config: &'a Config, peers: &'a PeerList,
+        parent: Option<PeerWithConfig<'a>>
     ) -> Result<()> 
     {
         for (peer_name, peer_config) in peers.iter() {
-            self.try_add_peer(dir_keys, config, peer_name, peer_config,
-                peers, parent)?;
+            let peer = (peer_name.as_str(), peer_config);
+            self.try_add_peer(dir_keys, config, peer, peers, parent)?;
             self.try_add_peers(dir_keys, config, &peer_config.children, 
                 Some((peer_name, peer_config)))?;
         }
@@ -533,16 +696,21 @@ impl ConfigsToWriteParsing {
     }
 
     fn finish_routes(&mut self) -> Result<()> {
-        self.targets.sort_unstable();
-        self.targets.dedup();
+        self.route_targets.sort_unstable();
+        let routes_count = self.route_targets.len();
+        self.route_targets.dedup();
+        if routes_count != self.route_targets.len() {
+            eprintln!("Duplicate route target, please check your config to make sure all IPs, forwards are unique!");
+            return Err(Error::DuplicatedRoute)
+        }
         loop {
             let mut updated = false;
-            for (peer_name, (_, routes_map)) in self.map.iter_mut() {
-                if routes_map.len() == self.targets.len() {
+            for (peer_name, (_, routes_info)) in self.map.iter_mut() {
+                if routes_info.routes.len() == self.route_targets.len() {
                     continue
                 }
-                for route_target in self.targets.iter() {
-                    if routes_map.contains_key(route_target) {
+                for route_target in self.route_targets.iter() {
+                    if routes_info.routes.contains_key(route_target) {
                         continue
                     }
                     // Look for route
@@ -552,31 +720,39 @@ impl ConfigsToWriteParsing {
                     // for (other_name, (_, other_map)) in self.map.iter() {
                         
                     // }
-                    if ! via.is_empty() && jump != 0 {
-                        routes_map_try_add(routes_map, route_target, via, jump, external)?;
-                        updated = true
-                    }
+                    // if ! via.is_empty() && jump != 0 {
+                    //     routes_map_try_add(&mut routes_info.map, route_target, via, jump, external)?;
+                    //     updated = true
+                    // }
                 }
             }
             if ! updated {
                 break
             }
         }
-        for (peer_name, (peer_config, 
-            routes_map)) in 
+        for (peer_name, (composite_config, 
+            routes_info)) in 
             self.map.iter_mut() 
         {
-            for (route_target, route_info) in routes_map.iter() {
-                if route_info.jump == 0 { continue }
-                if route_info.external {
-                    peer_config.network.routes.push(route_target.clone())
+            // let mut peers_map = HashMap::new();
+            for (route_target, route_info) in routes_info.routes.iter() {
+                if route_info.jump > 1 {
+                    if ! route_info.internal {
+                        composite_config.network.routes.push(route_target)
+                    }
+                    for netdev_peer in composite_config.netdev.peers.iter_mut() {
+                        if netdev_peer.name == route_info.via {
+                            netdev_peer.allowed.push(route_target);
+                            break
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn try_from_config<P: AsRef<Path>>(config: &Config, dir_all: P) 
+    fn try_from_config<P: AsRef<Path>>(config: &'a Config, dir_all: P) 
         -> Result<Self> 
     {
         let mut result = Self::default();
@@ -588,8 +764,8 @@ impl ConfigsToWriteParsing {
     }
 }
 
-impl ConfigsToWrite {
-    fn try_from_config<P: AsRef<Path>>(config: &Config, dir_all: P) 
+impl<'a> ConfigsToWrite<'a> {
+    fn try_from_config<P: AsRef<Path>>(config: &'a Config, dir_all: P) 
         -> Result<Self> 
     {
         let configs_parsing = 
@@ -617,9 +793,9 @@ impl ConfigsToWrite {
             buffer.push_str("[NetDev]\nName=");
             macro_rules! buffer_add_key_file {
                 ($key_file: expr) => {
-                    buffer.push_str(&$key_file.filename);
-                    content_to_file(&$key_file.key.base64()?, 
-                        &dir_keys.join(&$key_file.filename))?;
+                    buffer.push_str(&$key_file.name);
+                    content_to_file(&$key_file.base64()?, 
+                        &dir_keys.join(&$key_file.name))?;
                 };
             }
             buffer.push_str(&config.iface);
@@ -634,7 +810,7 @@ impl ConfigsToWrite {
                 buffer.push_str("\n[WireGuardPeer]\nPublicKey=");
                 buffer.push_str(&peer.pubkey.base64_string());
                 if let Some(psk) = &peer.psk {
-                    buffer.push_str("\nPreSharedKeyFile=");
+                    buffer.push_str("\nPreSharedKeyFile=/etc/systemd/network/keys/wg/");
                     buffer_add_key_file!(psk);
                 }
                 if ! peer.endpoint.is_empty() {
