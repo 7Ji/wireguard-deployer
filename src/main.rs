@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, iter::once, path::{Path, PathBuf}};
+use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}};
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -436,12 +436,11 @@ struct RouteInfo<'a> {
 
 type PeerWithConfig<'a> = (&'a str, &'a PeerConfig);
 type RoutesMap<'a> = BTreeMap<&'a str, RouteInfo<'a>>;
-type Neighbors<'a> = Vec<&'a str>;
 
 #[derive(Debug, Default)]
 struct RoutesInfo<'a> {
-    parent: &'a str,
-    neighbors: Neighbors<'a>,
+    // parent: &'a str,
+    nexts: Vec<(&'a str, usize)>,
     routes: RoutesMap<'a>
 }
 
@@ -477,8 +476,7 @@ impl<'a> RoutesInfo<'a> {
             None => ("", None),
         };
         let mut routes_info = RoutesInfo {
-            parent: &parent_name,
-            neighbors: Default::default(),
+            nexts: vec![(&parent_name, 3)],
             routes: Default::default(),
         };
         let (peer_name, peer_config) = peer;
@@ -495,7 +493,7 @@ impl<'a> RoutesInfo<'a> {
             routes_info.try_add_from_neighbor(neighbor_name, neighbor_config)?
         }
         routes_info.try_add_from_children(&peer_config.children)?;
-        routes_info.neighbors.sort_unstable();
+        routes_info.nexts.sort_unstable();
         Ok(routes_info)
     }
 
@@ -539,6 +537,7 @@ impl<'a> RoutesInfo<'a> {
         &mut self, peer_name: &'a str, peer_config: &'a PeerConfig
     ) -> Result<()> 
     {
+        self.nexts.push((peer_name, 3));
         self.try_add_from_peer(peer_name, peer_config, 3)
     }
 
@@ -556,7 +555,7 @@ impl<'a> RoutesInfo<'a> {
         &mut self, peer_name: &'a str, peer_config: &'a PeerConfig
     ) -> Result<()> 
     {
-        self.neighbors.push(peer_name);
+        self.nexts.push((peer_name, 2));
         self.try_add_from_peer(peer_name, peer_config, 2)
     }
 }
@@ -707,15 +706,10 @@ impl<'a> ConfigsToWriteParsing<'a> {
                     }
                     // Look for route
                     let mut new_route_info: Option<RouteInfo> = None;
-                    for (via, is_parent) in routes_info.neighbors.iter().map(|neighbor|(neighbor, false)).chain(once((&routes_info.parent, true))) {
+                    for (via, first_jump) in routes_info.nexts.iter() {
                         if via.is_empty() {
                             continue
                         }
-                        let first_jump = if is_parent {
-                            3
-                        } else {
-                            2
-                        };
                         let peer_routes_info = match self.map.get(via) {
                             Some((_, routes_info)) => routes_info,
                             None => continue,
