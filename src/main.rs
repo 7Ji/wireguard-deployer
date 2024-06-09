@@ -330,17 +330,6 @@ struct Config {
     peers: PeerList,
 }
 
-impl Config {
-    fn finalize(&mut self) {
-        if ! self.netdev.ends_with(".netdev") {
-            self.netdev.push_str(".netdev")
-        }
-        if ! self.network.ends_with(".network") {
-            self.network.push_str(".network")
-        }
-    }
-}
-
 
 /// A wireguard key in netdev that shall be stored in a file
 #[derive(Clone, Debug, Default)]
@@ -460,6 +449,20 @@ fn vec_string_contains_str(list: &Vec<String>, value: &str) -> bool {
     false
 }
 
+fn can_neighbors_direct<'a>(some: PeerWithConfig<'a>, other: PeerWithConfig<'a>) -> bool {
+    if let Some(direct) = &some.1.direct {
+        if ! vec_string_contains_str(direct, other.0) {
+            return false
+        }
+    }
+    if let Some(direct) = &other.1.direct {
+        if ! vec_string_contains_str(direct, some.0) {
+            return false
+        }
+    }
+    true
+}
+
 impl<'a> RoutesInfo<'a> {
     fn try_new(peer: PeerWithConfig<'a>, parent: Option<PeerWithConfig<'a>>, neighbors: &'a PeerList
     ) -> Result<Self>
@@ -478,22 +481,16 @@ impl<'a> RoutesInfo<'a> {
         if let Some(parent_config) = parent_config {
             routes_info.try_add_from_parent(parent_name, parent_config)?
         }
-        for (neighbor_name, neighbor_config) in neighbors .iter() {
+        for (neighbor_name, neighbor_config) in neighbors.iter() {
             if neighbor_name == peer_name {
                 continue
             }
-            if let Some(direct) = &peer_config.direct {
-                if ! direct.contains(neighbor_name) {
-                    continue
-                }
-            }
-            if let Some(direct) = &neighbor_config.direct {
-                if ! vec_string_contains_str(direct, peer_name) {
-                    continue
-                }
+            if ! can_neighbors_direct(peer, (neighbor_name, neighbor_config))  {
+                continue
             }
             routes_info.try_add_from_neighbor(neighbor_name, neighbor_config)?
         }
+        routes_info.try_add_from_children(&peer_config.children)?;
         routes_info.neighbors.sort_unstable();
         Ok(routes_info)
     }
@@ -532,6 +529,23 @@ impl<'a> RoutesInfo<'a> {
     ) -> Result<()> 
     {
         self.try_add_from_peer(peer_name, peer_config, 3)
+    }
+
+    fn try_add_from_child(
+        &mut self, peer_name: &'a str, peer_config: &'a PeerConfig
+    ) -> Result<()> 
+    {
+        self.try_add_from_peer(peer_name, peer_config, 3)
+    }
+
+    fn try_add_from_children(
+        &mut self, peers: &'a PeerList
+    ) -> Result<()> 
+    {
+        for (peer_name, peer_config) in peers.iter() {
+            self.try_add_from_child(peer_name, peer_config)?
+        }
+        Ok(())
     }
 
     fn try_add_from_neighbor(
@@ -614,6 +628,12 @@ impl<'a> ConfigsToWriteParsing<'a> {
                         })
                     }
                     for (neighbor_name, neighbor_config) in neighbors.iter() {
+                        if neighbor_name == peer_name {
+                            continue
+                        }
+                        if ! can_neighbors_direct(peer, (neighbor_name, neighbor_config)) {
+                            continue
+                        }
                         peers.push(NetDevPeer {
                             name: neighbor_name,
                             allowed: Default::default(),
@@ -743,8 +763,8 @@ impl<'a> ConfigsToWriteParsing<'a> {
                 }
             }
         }
-        for (composite_config, routes_info) in 
-            self.map.values_mut() 
+        for (_peer_name, (composite_config, routes_info)) in 
+            self.map.iter_mut() 
         {
             // let mut peers_map = HashMap::new();
             for (route_target, route_info) in routes_info.routes.iter() {
@@ -759,6 +779,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                         }
                     }
                 }
+                // println!("{} to {} via {} jump {}", peer_name, route_target, route_info.via, route_info.jump)
             }
         }
         Ok(())
@@ -867,8 +888,7 @@ fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let config = args.nth(1).ok_or(Error::ArgumentNotRight)?;
     let output = args.next().ok_or(Error::ArgumentNotRight)?;
     let mut file = file_open_checked(&config)?;
-    let mut config: Config = yaml_from_reader_checked(&mut file)?;
-    config.finalize();
+    let config: Config = yaml_from_reader_checked(&mut file)?;
     let configs_to_write = 
         ConfigsToWrite::try_from_config(&config, &output)?;
     configs_to_write.try_write(&output)
