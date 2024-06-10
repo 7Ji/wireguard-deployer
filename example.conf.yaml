@@ -12,37 +12,37 @@ mask: 24
 # but all other peers connect to the above network using hk1 as a "gateway". fuo, pdh, hk1 themselves assemble
 # a real full-mesh network.
 peers:
-  fuo:
-    ip: 192.168.77.2
+  siteA:
+    ip: 192.168.66.2
     endpoint: 
-      neighbor: fuo.fuckblizzard.com:51820
+      neighbor: siteA.example.com:51820
     forward:
-      - 192.168.67.0/24
-      - fd60:c3e0:a2d7::/48
-  pdh:
-    ip: 192.168.77.3
-    endpoint: pd6.fuckblizzard.com:51820
+      - 192.168.61.0/24
+      - fd60:c3e0:b3f0::/48
+  siteB:
+    ip: 192.168.66.3
+    endpoint: siteB.example.com:51820
     forward:
-      - 192.168.7.0/24
-      - 192.168.15.0/24
-      - 192.168.17.0/24
-      - fdb5:c701:19a6::/48
+      - 192.168.81.0/24
+      - 192.168.82.0/24
+      - 192.168.83.0/24
+      - fdb5:c701:1f3::/48
   # The below peers assemble a star network in which all traffic need to go through hk1
-  hk1:
-    ip: 192.168.77.96
+  siteC:
+    ip: 192.168.66.3
     # Alternatively, a peer can have different endpoint depending on whether its
     # parent, neighbor or child want to connect to it
     endpoint:
       # If hk1 has a parent, then its parent shall connect via this endpoint
-      parent: hk1.fuckblizzard.com:51820
+      parent: siteC.example.com:51820
       # hk1's neighbor shall connect to it via this endpoint
-      neighbor: hk1.fuckblizzard.com:51820
+      neighbor: siteC.example.com:51820
       # hk1's child shall connect to it via this endpoint
-      child: hk1.lan:51820
+      child: siteC.lan:51820
     children:
-      rz5:
-        ip: 192.168.77.97
-        endpoint: rz5.lan:51820
+      hostA:
+        ip: 192.168.66.97
+        endpoint: hostA.lan:51820
         # The selective peers in the same level this peer is able to connect directly, instead of going through the parent
         #  - This peer is always able to connect to its parent, if it lives in a recursive subnet (like this to `hk1`)
         #  - If not set, this peer is able to connect to every other peer at the same level
@@ -53,28 +53,28 @@ peers:
         direct: []
         # Unlimited layers of recursive children are supported
         children:
-          v7j:
-            ip: 192.168.77.201
-            endpoint: v7j.lan:51820
-          vbt:
-            ip: 192.168.77.202
-            endpoint: vbt.lan:51820
-          vdb:
-            ip: 192.168.77.203
-            endpoint: vdb.lan:51820
-      l3a:
-        ip: 192.168.77.98
-        endpoint: l3a.lan:51820
+          vmA:
+            ip: 192.168.66.201
+            endpoint: 172.16.47.2:51820
+          vmB:
+            ip: 192.168.66.202
+            endpoint: 172.16.47.3:51820
+          vmC:
+            ip: 192.168.66.203
+            endpoint: 172.16.47.4:51820
+      hostB:
+        ip: 192.168.66.98
+        endpoint: hostB.lan:51820
         direct: []
-      cm2:
-        ip: 192.168.77.99
-        endpoint: cm2.lan:51820
+      hostC:
+        ip: 192.168.66.99
+        endpoint: hostC.lan:51820
         direct: []
-      r33:
-        ip: 192.168.77.100
-        endpoint: r33.lan:51820
+      hostD:
+        ip: 192.168.66.100
+        endpoint: hostD.lan:51820
         direct: []
-      mi3:
-        ip: 192.168.77.101
-        endpoint: mi3.lan:51820
+      hostE:
+        ip: 192.168.66.101
+        endpoint: hostE.lan:51820
         direct: []
