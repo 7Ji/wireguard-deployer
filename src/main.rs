@@ -791,7 +791,6 @@ impl<'a> ConfigsToWriteParsing<'a> {
                                     internal: route_info.internal,
                                 }),
                             }
-                            break
                         }
                     }
                     if let Some(new_route_info) = new_route_info {
@@ -1009,7 +1008,7 @@ impl<'a> ConfigsToWrite<'a> {
                 }
                 buffer.push('\n');
             }
-            buffer.finish_config(&format!("{}.netdev", &netdev.name))?;
+            buffer.finish_config(&format!("{}.netdev", netdev.name))?;
             buffer.clear();
             
             let network = &config.network;
