@@ -17,7 +17,7 @@ The ouput binary would be `target/release/sd-networkd-wg-deploy`
 ```
 in which:
 - `[config file]` is the path to a .yaml file that meets the format documented in the following section
-- `[to be deployed dir]` is the path to a (possibly already existing) folder that keys are configs would be stored in. Keys are always lazily generated while configs are always freshly generated, so you can place your existing keys in corresponding path to only let the deployer generate configs.
+- `[to be deployed dir]` is the path to a (possibly already existing) folder that keys and configs would be stored in. Keys are always lazily generated while configs are always freshly generated, so you can place your existing keys in corresponding path to only let the deployer generate configs.
 
 e.g.:
 ```
@@ -26,139 +26,139 @@ e.g.:
 
 The result to-be-deployed dir structure would be like this:
 ```
-example.d/
+example.d
 ├── configs
-│   ├── cm2
+│   ├── hostA
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-cm2-hk1
-│   │           └── private-cm2
-│   ├── cm2.tar
-│   ├── fuo
+│   │           ├── pre-shared-hostA-siteC
+│   │           ├── pre-shared-hostA-vmA
+│   │           ├── pre-shared-hostA-vmB
+│   │           ├── pre-shared-hostA-vmC
+│   │           └── private-hostA
+│   ├── hostA.tar
+│   ├── hostB
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-fuo-hk1
-│   │           ├── pre-shared-fuo-pdh
-│   │           └── private-fuo
-│   ├── fuo.tar
-│   ├── hk1
+│   │           ├── pre-shared-hostB-siteC
+│   │           └── private-hostB
+│   ├── hostB.tar
+│   ├── hostC
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-cm2-hk1
-│   │           ├── pre-shared-fuo-hk1
-│   │           ├── pre-shared-hk1-l3a
-│   │           ├── pre-shared-hk1-mi3
-│   │           ├── pre-shared-hk1-pdh
-│   │           ├── pre-shared-hk1-r33
-│   │           ├── pre-shared-hk1-rz5
-│   │           └── private-hk1
-│   ├── hk1.tar
-│   ├── l3a
+│   │           ├── pre-shared-hostC-siteC
+│   │           └── private-hostC
+│   ├── hostC.tar
+│   ├── hostD
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-hk1-l3a
-│   │           └── private-l3a
-│   ├── l3a.tar
-│   ├── mi3
+│   │           ├── pre-shared-hostD-siteC
+│   │           └── private-hostD
+│   ├── hostD.tar
+│   ├── hostE
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-hk1-mi3
-│   │           └── private-mi3
-│   ├── mi3.tar
-│   ├── pdh
+│   │           ├── pre-shared-hostE-siteC
+│   │           └── private-hostE
+│   ├── hostE.tar
+│   ├── siteA
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-fuo-pdh
-│   │           ├── pre-shared-hk1-pdh
-│   │           └── private-pdh
-│   ├── pdh.tar
-│   ├── r33
+│   │           ├── pre-shared-siteA-siteB
+│   │           ├── pre-shared-siteA-siteC
+│   │           └── private-siteA
+│   ├── siteA.tar
+│   ├── siteB
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-hk1-r33
-│   │           └── private-r33
-│   ├── r33.tar
-│   ├── rz5
+│   │           ├── pre-shared-siteA-siteB
+│   │           ├── pre-shared-siteB-siteC
+│   │           └── private-siteB
+│   ├── siteB.tar
+│   ├── siteC
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-hk1-rz5
-│   │           ├── pre-shared-rz5-v7j
-│   │           ├── pre-shared-rz5-vbt
-│   │           ├── pre-shared-rz5-vdb
-│   │           └── private-rz5
-│   ├── rz5.tar
-│   ├── v7j
+│   │           ├── pre-shared-hostA-siteC
+│   │           ├── pre-shared-hostB-siteC
+│   │           ├── pre-shared-hostC-siteC
+│   │           ├── pre-shared-hostD-siteC
+│   │           ├── pre-shared-hostE-siteC
+│   │           ├── pre-shared-siteA-siteC
+│   │           ├── pre-shared-siteB-siteC
+│   │           └── private-siteC
+│   ├── siteC.tar
+│   ├── vmA
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-rz5-v7j
-│   │           ├── pre-shared-v7j-vbt
-│   │           ├── pre-shared-v7j-vdb
-│   │           └── private-v7j
-│   ├── v7j.tar
-│   ├── vbt
+│   │           ├── pre-shared-hostA-vmA
+│   │           ├── pre-shared-vmA-vmB
+│   │           ├── pre-shared-vmA-vmC
+│   │           └── private-vmA
+│   ├── vmA.tar
+│   ├── vmB
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-rz5-vbt
-│   │           ├── pre-shared-v7j-vbt
-│   │           ├── pre-shared-vbt-vdb
-│   │           └── private-vbt
-│   ├── vbt.tar
-│   ├── vdb
+│   │           ├── pre-shared-hostA-vmB
+│   │           ├── pre-shared-vmA-vmB
+│   │           ├── pre-shared-vmB-vmC
+│   │           └── private-vmB
+│   ├── vmB.tar
+│   ├── vmC
 │   │   ├── 30-wireguard.netdev
 │   │   ├── 40-wireguard.network
 │   │   └── keys
 │   │       └── wg
-│   │           ├── pre-shared-rz5-vdb
-│   │           ├── pre-shared-v7j-vdb
-│   │           ├── pre-shared-vbt-vdb
-│   │           └── private-vdb
-│   └── vdb.tar
+│   │           ├── pre-shared-hostA-vmC
+│   │           ├── pre-shared-vmA-vmC
+│   │           ├── pre-shared-vmB-vmC
+│   │           └── private-vmC
+│   └── vmC.tar
 └── keys
-    ├── pre-shared-cm2-hk1
-    ├── pre-shared-fuo-hk1
-    ├── pre-shared-fuo-pdh
-    ├── pre-shared-hk1-l3a
-    ├── pre-shared-hk1-mi3
-    ├── pre-shared-hk1-pdh
-    ├── pre-shared-hk1-r33
-    ├── pre-shared-hk1-rz5
-    ├── pre-shared-rz5-v7j
-    ├── pre-shared-rz5-vbt
-    ├── pre-shared-rz5-vdb
-    ├── pre-shared-v7j-vbt
-    ├── pre-shared-v7j-vdb
-    ├── pre-shared-vbt-vdb
-    ├── private-cm2
-    ├── private-fuo
-    ├── private-hk1
-    ├── private-l3a
-    ├── private-mi3
-    ├── private-pdh
-    ├── private-r33
-    ├── private-rz5
-    ├── private-v7j
-    ├── private-vbt
-    └── private-vdb
+    ├── pre-shared-hostA-siteC
+    ├── pre-shared-hostA-vmA
+    ├── pre-shared-hostA-vmB
+    ├── pre-shared-hostA-vmC
+    ├── pre-shared-hostB-siteC
+    ├── pre-shared-hostC-siteC
+    ├── pre-shared-hostD-siteC
+    ├── pre-shared-hostE-siteC
+    ├── pre-shared-siteA-siteB
+    ├── pre-shared-siteA-siteC
+    ├── pre-shared-siteB-siteC
+    ├── pre-shared-vmA-vmB
+    ├── pre-shared-vmA-vmC
+    ├── pre-shared-vmB-vmC
+    ├── private-hostA
+    ├── private-hostB
+    ├── private-hostC
+    ├── private-hostD
+    ├── private-hostE
+    ├── private-siteA
+    ├── private-siteB
+    ├── private-siteC
+    ├── private-vmA
+    ├── private-vmB
+    └── private-vmC
 ```
 In which the .tar file already contains a sane permissioon and ownership setup:
 ```

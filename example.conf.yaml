@@ -42,7 +42,10 @@ peers:
     children:
       hostA:
         ip: 192.168.66.97
-        endpoint: hostA.lan:51820
+        endpoint: 
+          parent: hostA.lan:51820
+          neighbor: hostA.lan:51820
+          child: 172.16.47.1:51820
         # The selective peers in the same level this peer is able to connect directly, instead of going through the parent
         #  - This peer is always able to connect to its parent, if it lives in a recursive subnet (like this to `hk1`)
         #  - If not set, this peer is able to connect to every other peer at the same level
