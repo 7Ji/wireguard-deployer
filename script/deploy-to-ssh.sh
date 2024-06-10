@@ -34,7 +34,8 @@ i=0
 while [[ "${i}" -lt "${count}" ]]; do
     tar_name="${tar_names[$i]}"
     remote="${remotes[$i]}"
-    echo "Deploying: ${tar_name} => ${remote}"
+    echo "=> Deploying: ${tar_name} => ${remote}"
     ssh "${remote}" 'sudo tar -C /etc/systemd/network -xv && sudo systemctl restart systemd-networkd' < "${tar_name}"
+    echo "=> Deployed: ${tar_name} => ${remote}"
     let i++
 done
