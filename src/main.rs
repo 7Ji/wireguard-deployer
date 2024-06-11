@@ -366,6 +366,9 @@ struct PeerConfig {
     /// the same level directly, even if it's empty, in that case it would only
     /// be able to connect to its parent directly
     direct: Option<Vec<String>>,
+    /// Peer names that shall be kept alive, useful for self => NAT => target
+    #[serde(default)]
+    keep: Vec<String>,
     /// Child peers connected under this peer.
     /// - Peers living as child can always connect to their parent. If none of 
     /// children can connect to other peers, this is essentially a star network
@@ -375,6 +378,18 @@ struct PeerConfig {
     children: PeerList
 }
 
+const fn default_psk() -> bool {
+    true
+}
+
+const fn default_mask() -> u8 {
+    24
+}
+
+fn default_iface() -> String {
+    "wg0".into()
+}
+
 const fn default_port() -> u16 {
     51820
 }
@@ -382,7 +397,7 @@ const fn default_port() -> u16 {
 #[derive(Debug, Deserialize)]
 struct Config {
     /// Whether to generate pre-shared key for each peer pair
-    #[serde(default)]
+    #[serde(default = "default_psk")]
     psk: bool,
     /// The .netdev unit name, without `.netdev` suffix, (the suffix would be 
     /// appended automatically), e.g. `30-wireguard`
@@ -391,8 +406,10 @@ struct Config {
     /// appended automatically), e.g. `40-wireguard`
     network: String,
     /// The network subnet mask,
+    #[serde(default = "default_mask")]
     mask: u8,
     /// The interface name, e.g. `wg0`
+    #[serde(default = "default_iface")]
     iface: String,
     /// The default port for endpoint if an endpoint is set to advanced style
     /// but without actual port set
@@ -401,7 +418,6 @@ struct Config {
     /// The list of peers
     peers: PeerList,
 }
-
 
 /// A wireguard key in netdev that shall be stored in a file
 #[derive(Clone, Debug, Default)]
@@ -521,6 +537,8 @@ struct NetDevPeer<'a> {
     endpoint: NetDevPeerEndpointAddress<'a>,
     /// The pre-shared key between the peer
     psk: Option<NetDevKeyFile>,
+    /// Keep-alive
+    keep: bool,
 }
 
 impl<'a> Default for NetDevPeer<'a> {
@@ -530,7 +548,8 @@ impl<'a> Default for NetDevPeer<'a> {
             allowed: Default::default(), 
             pubkey: Default::default(), 
             endpoint: Default::default(), 
-            psk: Default::default() 
+            psk: Default::default(),
+            keep: Default::default(),
         }
     }
 }
@@ -784,6 +803,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                                 } else {
                                     None
                                 },
+                                keep: vec_string_contains_str(&peer_config.keep, $peer_name)
                             })
                         };
                     }
@@ -1104,6 +1124,9 @@ impl<'a> ConfigsToWrite<'a> {
                 for allowed in peer.allowed.iter() {
                     buffer.push_str("\nAllowedIPs=");
                     buffer.push_str(&allowed);
+                }
+                if peer.keep {
+                    buffer.push_str("\nPersistentKeepalive=25");
                 }
                 buffer.push('\n');
             }
