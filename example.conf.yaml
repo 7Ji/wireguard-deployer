@@ -8,20 +8,25 @@ iface: wg0
 network: 40-wireguard
 # The subnet mask, would be appended after IP
 mask: 24
+# The wireguard listening port, default 51820
+port: 51820
 # The below peers assemble a pseudo full-mesh network in which fuo, pdh, hk1 are able to connect to each other,
 # but all other peers connect to the above network using hk1 as a "gateway". fuo, pdh, hk1 themselves assemble
 # a real full-mesh network.
 peers:
   siteA:
     ip: 192.168.66.2
-    endpoint: 
-      neighbor: siteA.example.com:51820
+    # An endpoint could be set with only host, in this case port from global would be used
+    endpoint: siteA.example.com
     forward:
       - 192.168.61.0/24
       - fd60:c3e0:b3f0::/48
   siteB:
     ip: 192.168.66.3
-    endpoint: siteB.example.com:51820
+    # An endpoint could also be set with explicit port
+    endpoint: 
+      host: siteB.example.com
+      port: 51822
     forward:
       - 192.168.81.0/24
       - 192.168.82.0/24
@@ -31,21 +36,22 @@ peers:
   siteC:
     ip: 192.168.66.4
     # Alternatively, a peer can have different endpoint depending on whether its
-    # parent, neighbor or child want to connect to it
+    # parent, neighbor or child want to connect to it, or a specific peer name
     endpoint:
       # If hk1 has a parent, then its parent shall connect via this endpoint
-      parent: siteC.example.com:51820
+      ^parent: siteC.example.com
       # hk1's neighbor shall connect to it via this endpoint
-      neighbor: siteC.example.com:51820
+      ^neighbor: siteC.example.com
       # hk1's child shall connect to it via this endpoint
-      child: siteC.lan:51820
+      ^child: siteC.lan
+      hostE: siteC.other.lan
     children:
       hostA:
         ip: 192.168.66.97
         endpoint: 
-          parent: hostA.lan:51820
-          neighbor: hostA.lan:51820
-          child: 172.16.47.1:51820
+          ^parent: hostA.lan
+          ^neighbor: hostA.lan
+          ^child: 172.16.47.1
         # The selective peers in the same level this peer is able to connect directly, instead of going through the parent
         #  - This peer is always able to connect to its parent, if it lives in a recursive subnet (like this to `hk1`)
         #  - If not set, this peer is able to connect to every other peer at the same level
@@ -58,26 +64,26 @@ peers:
         children:
           vmA:
             ip: 192.168.66.201
-            endpoint: 172.16.47.2:51820
+            endpoint: 172.16.47.2
           vmB:
             ip: 192.168.66.202
-            endpoint: 172.16.47.3:51820
+            endpoint: 172.16.47.3
           vmC:
             ip: 192.168.66.203
-            endpoint: 172.16.47.4:51820
+            endpoint: 172.16.47.4
       hostB:
         ip: 192.168.66.98
-        endpoint: hostB.lan:51820
+        endpoint: hostB.lan
         direct: []
       hostC:
         ip: 192.168.66.99
-        endpoint: hostC.lan:51820
+        endpoint: hostC.lan
         direct: []
       hostD:
         ip: 192.168.66.100
-        endpoint: hostD.lan:51820
+        endpoint: hostD.lan
         direct: []
       hostE:
         ip: 192.168.66.101
-        endpoint: hostE.lan:51820
+        endpoint: hostE.lan
         direct: []

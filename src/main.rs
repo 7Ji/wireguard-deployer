@@ -33,6 +33,7 @@ enum Error {
     Base64DecodeError (String),
     Base64DecodeBufferTooSmall,
     DuplicatedRoute,
+    FormatError (String),
     ImpossibleLogic,
     IoError (String),
     // TarError (String),
@@ -73,6 +74,7 @@ macro_rules! impl_from_error_display {
 impl_from_error_display!(std::io::Error, IoError);
 impl_from_error_display!(serde_yaml::Error, YAMLError);
 impl_from_error_display!(base64::DecodeError, Base64DecodeError);
+impl_from_error_display!(std::fmt::Error, FormatError);
 // impl_from_error_display!(tar::)
 
 impl std::fmt::Display for Error {
@@ -90,6 +92,8 @@ impl std::fmt::Display for Error {
                 write!(f, "Base64 decode buffer too small"),
             Error::DuplicatedRoute =>
                 write!(f, "Duplicated route"),
+            Error::FormatError(e) =>
+                write!(f, "Format Error: {}", e),
             Error::ImpossibleLogic => write!(f, "Impossible logic"),
             Error::IoError(e) => write!(f, "IO Error: {}", e),
             Error::YAMLError(e) => write!(f, "YAML Error: {}", e),
@@ -282,16 +286,40 @@ type PeerList = BTreeMap<String, PeerConfig>;
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum PeerEndpointConfig {
-    Plain (String),
-    Multi {
-        #[serde(default)]
-        parent: String,
-        #[serde(default)]
-        neighbor: String,
-        #[serde(default)]
-        child: String
+enum EndpointAddress {
+    HostOnly (String),
+    HostPort {
+        host: String,
+        port: Option<u16>
     }
+}
+
+impl Default for EndpointAddress {
+    fn default() -> Self {
+        Self::HostOnly(Default::default())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PeerEndpointConfig {
+    Plain (EndpointAddress),
+    Multi {
+        #[serde(default, rename = "^parent")]
+        parent: EndpointAddress,
+        #[serde(default, rename = "^neighbor")]
+        neighbor: EndpointAddress,
+        #[serde(default, rename = "^child")]
+        child: EndpointAddress,
+        #[serde(flatten)]
+        map: HashMap<String, EndpointAddress>,
+    }
+}
+
+enum PeerEndpointCharacter {
+    Parent,
+    Neighbor,
+    Child
 }
 
 impl Default for PeerEndpointConfig {
@@ -301,22 +329,20 @@ impl Default for PeerEndpointConfig {
 }
 
 impl PeerEndpointConfig {
-    fn parent(&self) -> &str {
+    fn get(&self, name: &str, character: PeerEndpointCharacter) -> &EndpointAddress {
         match self {
             PeerEndpointConfig::Plain(endpoint) => endpoint,
-            PeerEndpointConfig::Multi { parent, neighbor: _, child: _ } => parent,
-        }
-    }
-    fn neighbor(&self) -> &str {
-        match self {
-            PeerEndpointConfig::Plain(endpoint) => endpoint,
-            PeerEndpointConfig::Multi { parent: _, neighbor, child: _ } => neighbor,
-        }
-    }
-    fn child(&self) -> &str {
-        match self {
-            PeerEndpointConfig::Plain(endpoint) => endpoint,
-            PeerEndpointConfig::Multi { parent: _, neighbor: _, child } => child,
+            PeerEndpointConfig::Multi { 
+                parent, neighbor, child, 
+                map 
+            } => match map.get(name) {
+                    Some(endpoint) => endpoint,
+                    None => match character {
+                        PeerEndpointCharacter::Parent => parent,
+                        PeerEndpointCharacter::Neighbor => neighbor,
+                        PeerEndpointCharacter::Child => child,
+                    },
+                },
         }
     }
 }
@@ -365,14 +391,9 @@ struct PeerConfig {
     children: PeerList
 }
 
-// fn peer_reachable(peer_name: &String, peer_config: &PeerConfig, endpoint_name: &String, endpoint_config: &PeerConfig) -> bool {
-//     match (&peer_config.reach, &endpoint_config.reach) {
-//         (Some(peer_reach), Some(endpoint_reach)) => peer_reach.contains(endpoint_name) && endpoint_reach.contains(peer_name),
-//         (Some(peer_reach), None) => peer_reach.contains(endpoint_name),
-//         (None, Some(endpoint_reach)) => endpoint_reach.contains(peer_name),
-//         (None, None) => true,
-//     }
-// }
+const fn default_port() -> u16 {
+    51820
+}
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -389,6 +410,10 @@ struct Config {
     mask: u8,
     /// The interface name, e.g. `wg0`
     iface: String,
+    /// The default port for endpoint if an endpoint is set to advanced style
+    /// but without actual port set
+    #[serde(default = "default_port")]
+    port: u16,
     /// The list of peers
     peers: PeerList,
 }
@@ -425,8 +450,44 @@ impl NetDevKeyFile {
     }
 }
 
-/// A wireguard peer in a netdev
 #[derive(Debug, Default)]
+struct NetDevPeerEndpointAddress<'a> {
+    host: &'a str,
+    port: u16
+}
+
+impl<'a> std::fmt::Display for NetDevPeerEndpointAddress<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
+}
+
+impl<'a> NetDevPeerEndpointAddress<'a> {
+    fn is_empty(&self) -> bool {
+        self.host.is_empty()
+    }
+    fn push_to_string(&self, buffer: &mut String) -> Result<()> {
+        buffer.push_str(self.host);
+        buffer.push(':');
+        std::fmt::Write::write_fmt(buffer, format_args!("{}", self.port))?;
+        Ok(())
+    }
+    fn from_owned(owned: &'a EndpointAddress, port_global: u16) -> Self {
+        match owned {
+            EndpointAddress::HostOnly(host) => Self {
+                host,
+                port: port_global,
+            },
+            EndpointAddress::HostPort { host, port } => Self {
+                host,
+                port: port.unwrap_or(port_global)
+            },
+        }
+    }
+}
+
+/// A wireguard peer in a netdev
+#[derive(Debug)]
 struct NetDevPeer<'a> {
     name: &'a str,
     /// The incoming IP ranges this is allowed to access, also hinting whether
@@ -435,9 +496,21 @@ struct NetDevPeer<'a> {
     /// The public key of this peer
     pubkey: WireGuardKey,
     /// The endpoint
-    endpoint: &'a str,
+    endpoint: NetDevPeerEndpointAddress<'a>,
     /// The pre-shared key between the peer
     psk: Option<NetDevKeyFile>,
+}
+
+impl<'a> Default for NetDevPeer<'a> {
+    fn default() -> Self {
+        Self { 
+            name: Default::default(), 
+            allowed: Default::default(), 
+            pubkey: Default::default(), 
+            endpoint: Default::default(), 
+            psk: Default::default() 
+        }
+    }
 }
 
 /// A .netdev config
@@ -683,7 +756,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                                 name: $peer_name,
                                 allowed: Default::default(),
                                 pubkey: self.get_key_or_new(dir_keys, $peer_name)?.1.clone(),
-                                endpoint: &$peer_endpoint,
+                                endpoint: NetDevPeerEndpointAddress::from_owned($peer_endpoint, config.port),
                                 psk: if config.psk {
                                     Some(self.get_psk_or_new(dir_keys, peer_name, $peer_name)?.clone())
                                 } else {
@@ -693,17 +766,17 @@ impl<'a> ConfigsToWriteParsing<'a> {
                         };
                     }
                     if let Some((parent_name, parent_config)) = parent {
-                        add_peer!(parent_name, parent_config, parent_config.endpoint.child())
+                        add_peer!(parent_name, parent_config, parent_config.endpoint.get(peer_name, PeerEndpointCharacter::Child))
                     }
                     for (neighbor_name, neighbor_config) in neighbors.iter() {
                         if neighbor_name == peer_name ||
                          ! can_neighbors_direct(peer, (neighbor_name, neighbor_config)) {
                             continue
                         }
-                        add_peer!(neighbor_name, neighbor_config, neighbor_config.endpoint.neighbor())
+                        add_peer!(neighbor_name, neighbor_config, neighbor_config.endpoint.get(peer_name, PeerEndpointCharacter::Neighbor))
                     }
                     for (child_name, child_config) in peer_config.children.iter() {
-                        add_peer!(child_name, child_config, child_config.endpoint.parent())
+                        add_peer!(child_name, child_config, child_config.endpoint.get(peer_name, PeerEndpointCharacter::Parent))
                     }
                     peers
                 },
@@ -947,6 +1020,10 @@ impl WriterBuffer {
         self.buffer.push(char)
     }
 
+    fn push_endpoint(&mut self, endpoint: &NetDevPeerEndpointAddress) -> Result<()> {
+        endpoint.push_to_string(&mut self.buffer)
+    }
+
     fn clear(&mut self) {
         self.buffer.clear()
     }
@@ -1000,7 +1077,7 @@ impl<'a> ConfigsToWrite<'a> {
                 }
                 if ! peer.endpoint.is_empty() {
                     buffer.push_str("\nEndpoint=");
-                    buffer.push_str(&peer.endpoint);
+                    buffer.push_endpoint(&peer.endpoint)?
                 }
                 for allowed in peer.allowed.iter() {
                     buffer.push_str("\nAllowedIPs=");
