@@ -17,16 +17,14 @@ peers:
   siteA:
     ip: 192.168.66.2
     # An endpoint could be set with only host, in this case port from global would be used
-    endpoint: siteA.example.com
+    endpoint: 1111:2222::3333
     forward:
       - 192.168.61.0/24
       - fd60:c3e0:b3f0::/48
   siteB:
     ip: 192.168.66.3
     # An endpoint could also be set with explicit port
-    endpoint: 
-      host: siteB.example.com
-      port: 51822
+    endpoint: siteB.example.com:51822
     forward:
       - 192.168.81.0/24
       - 192.168.82.0/24
@@ -49,7 +47,7 @@ peers:
       hostA:
         ip: 192.168.66.97
         endpoint: 
-          ^parent: hostA.lan
+          ^parent: "[1234::1]:51822"
           ^neighbor: hostA.lan
           ^child: 172.16.47.1
         # The selective peers in the same level this peer is able to connect directly, instead of going through the parent

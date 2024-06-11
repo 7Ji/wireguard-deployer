@@ -16,7 +16,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}};
+use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}, str::FromStr};
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize};
 
@@ -286,33 +286,17 @@ type PeerList = BTreeMap<String, PeerConfig>;
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-enum EndpointAddress {
-    HostOnly (String),
-    HostPort {
-        host: String,
-        port: Option<u16>
-    }
-}
-
-impl Default for EndpointAddress {
-    fn default() -> Self {
-        Self::HostOnly(Default::default())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
 enum PeerEndpointConfig {
-    Plain (EndpointAddress),
+    Plain (String),
     Multi {
         #[serde(default, rename = "^parent")]
-        parent: EndpointAddress,
+        parent: String,
         #[serde(default, rename = "^neighbor")]
-        neighbor: EndpointAddress,
+        neighbor: String,
         #[serde(default, rename = "^child")]
-        child: EndpointAddress,
+        child: String,
         #[serde(flatten)]
-        map: HashMap<String, EndpointAddress>,
+        map: HashMap<String, String>,
     }
 }
 
@@ -329,7 +313,7 @@ impl Default for PeerEndpointConfig {
 }
 
 impl PeerEndpointConfig {
-    fn get(&self, name: &str, character: PeerEndpointCharacter) -> &EndpointAddress {
+    fn get(&self, name: &str, character: PeerEndpointCharacter) -> &str {
         match self {
             PeerEndpointConfig::Plain(endpoint) => endpoint,
             PeerEndpointConfig::Multi { 
@@ -453,6 +437,7 @@ impl NetDevKeyFile {
 #[derive(Debug, Default)]
 struct NetDevPeerEndpointAddress<'a> {
     host: &'a str,
+    v6: bool,
     port: u16
 }
 
@@ -467,21 +452,58 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
         self.host.is_empty()
     }
     fn push_to_string(&self, buffer: &mut String) -> Result<()> {
+        if self.v6 {
+            buffer.push('[');
+        }
         buffer.push_str(self.host);
+        if self.v6 {
+            buffer.push(']');
+        }
         buffer.push(':');
         std::fmt::Write::write_fmt(buffer, format_args!("{}", self.port))?;
         Ok(())
     }
-    fn from_owned(owned: &'a EndpointAddress, port_global: u16) -> Self {
-        match owned {
-            EndpointAddress::HostOnly(host) => Self {
-                host,
+    fn from_str_with_port_global(value: &'a str, port_global: u16) -> Self {
+        match std::net::IpAddr::from_str(value) {
+            Ok(r) => Self {
+                host: value,
+                v6: r.is_ipv6(),
                 port: port_global,
             },
-            EndpointAddress::HostPort { host, port } => Self {
-                host,
-                port: port.unwrap_or(port_global)
-            },
+            Err(_) => 
+                // Only possible: domain(+port), v4+port, v6+port
+                match value.rsplit_once(':') {
+                    Some((mut host, port)) => {
+                        let port = match port.parse() {
+                            Ok(port) => port,
+                            Err(_) => {
+                                host = value;
+                                port_global
+                            },
+                        };
+                        // Only possible: domain, v4, v6
+                        if host.starts_with('[') && host.ends_with(']') {
+                            let host = &host[1..host.len()-1];
+                            if let Ok(std::net::IpAddr::V6(_)) = std::net::IpAddr::from_str(host) {
+                                return Self {
+                                    host,
+                                    v6: true,
+                                    port,
+                                }
+                            }
+                        }
+                        Self {
+                            host,
+                            v6: false,
+                            port,
+                        }
+                    },
+                    None => Self {
+                        host: value,
+                        v6: false,
+                        port: port_global,
+                    },
+                },
         }
     }
 }
@@ -756,7 +778,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                                 name: $peer_name,
                                 allowed: Default::default(),
                                 pubkey: self.get_key_or_new(dir_keys, $peer_name)?.1.clone(),
-                                endpoint: NetDevPeerEndpointAddress::from_owned($peer_endpoint, config.port),
+                                endpoint: NetDevPeerEndpointAddress::from_str_with_port_global($peer_endpoint, config.port),
                                 psk: if config.psk {
                                     Some(self.get_psk_or_new(dir_keys, peer_name, $peer_name)?.clone())
                                 } else {

@@ -12,9 +12,15 @@ cargo build --release
 The ouput binary would be `target/release/sd-networkd-wg-deploy`
 
 ## Usage
+To run a built binary
 ```
 ./sd-networkd-wg-deploy [config file] [to-be-deployed dir]
 ```
+Alternatively, to run from the project root directly:
+```
+cargo run --release -- [config file] [to-be-deployed dir]
+```
+
 in which:
 - `[config file]` is the path to a .yaml file that meets the format documented in the following section
 - `[to be deployed dir]` is the path to a (possibly already existing) folder that keys and configs would be stored in. Keys are always lazily generated while configs are always freshly generated, so you can place your existing keys in corresponding path to only let the deployer generate configs.
@@ -185,11 +191,12 @@ sudo systemctl restart systemd-networkd
 ## Config
 The config format is simple yet powerful, it's defined as follows:
 ```yaml
-psk: [bool, global pre-shared keys option, e.g. true]
-iface: [string, global interface name, e.g. wg0]
+psk: [bool, global pre-shared keys option, default true]
+iface: [string, optional, global interface name, default wg0]
 netdev: [string, global systemd.netdev name without suffix, e.g. 30-wireguard]
 network: [string, global systemd.network name without suffix, e.g. 40-wireguard]
-mask: [unsigned integer, global wireguard network subnet netmask suffix, e.g. 24]
+port: [unsigned integer, optional, global fallback port for host-only endpoint, default 51820]
+mask: [unsigned integer, optional, global wireguard network subnet netmask suffix, default 24]
 peers: [map of peer, top level peers]
 ```
 In which, a `peer` map is defined as follows:
@@ -199,7 +206,7 @@ In which, a `peer` map is defined as follows:
   netdev: [string, optional, peer systemd.netdev name without suffix, if not set then global netdev would be used, e.g. 50-wireguard-personal]
   network: [string, optional, peer systemd.network name without suffix, if not set then global network would be used, e.g. 60-wireguard-personal]
   ip: [string, wireguard network ip without subnet netmask suffix, e.g. 192.168.77.2]
-  endpoint: [endpoint definition, optional, either a plain string, e.g. siteA.host.com, or advanced endpoint definition]
+  endpoint: [endpoint definition, optional, either a plain endpoint address (see below), or advanced endpoint definition (see below)]
   forward: [list of IP ranges, optional, non-wireguard subnets this peer can forward wireguard traffic into]
   children: [map of peer, optional, peers using this peer as "router" to talk to the wireguard network]
   direct: [list of peer names, optional, selective peers in current layer that this peer is able to connect to directly, if not set then assuming all, if set to empty then none and only able to connect to parent (if existing) / children]
@@ -207,10 +214,23 @@ In which, a `peer` map is defined as follows:
 In which, advanced endpoint definition is as follows:
 ```yaml
 endpoint:
-  parent: [string, endpoint address that this peer's parent shall use to connect to this peer]
-  neighbor: [string, endpoint address that this peer's neighbors shall use to connect to this peer]
-  child: [string, endpoint address that this peer's children shall use to connect to this peer]
+  ^parent: [string, endpoint address that this peer's parent shall use to connect to this peer]
+  ^neighbor: [string, endpoint address that this peer's neighbors shall use to connect to this peer]
+  ^child: [string, endpoint address that this peer's children shall use to connect to this peer]
+  peerA: [string, endpoint address that peerA shall use to connect to this peer]
+  peerB: [string, ...]
+  ...
 ```
+In which, endpoint addresss is a plain string in any one of the following formats:
+```yaml
+endpoint: example.com # domain as host
+ednpoint: example.com:51820 # domain as host + port
+endpoint: 123.234.51.67 # ipv4 as host
+endpoint: 123.234.51.67:51820 # ipv4 as host + port
+endpoint: 1111:2222::3333 # ipv6 as host
+endpoint: "[1111:2222::3333]:51800" # ipv6 as host + port
+```
+
 The above may look complicated but it's in fact very simple, e.g. a simple full mesh setup could be defined as follows:
 ```yaml
 psk: true
@@ -318,8 +338,8 @@ peers:
   siteD:
     ip: 192.168.66.5
     endpoint:
-      neighbor: siteD.example.com
-      child: siteD.lan
+      ^neighbor: siteD.example.com
+      ^child: siteD.lan
     children:
       hostA:
         ip: 192.168.66.51
