@@ -1225,7 +1225,7 @@ impl<'a> From<&'a ConfigsToWriteParsing<'a>> for ConfigToSerialize<'a> {
             }
             let mut forward = Vec::new();
             for (route_target, route_info) in routes_info.routes.iter() {
-                if ! route_info.internal {
+                if ! route_info.internal && route_info.jump < 2 {
                     forward.push(*route_target)
                 }
             }
