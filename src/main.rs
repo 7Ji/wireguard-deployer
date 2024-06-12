@@ -1187,7 +1187,7 @@ struct PeerConfigToSerialize<'a> {
     #[serde(default)]
     iface: &'a str,
     #[serde(default)]
-    endpoint: HashMap<&'a str, &'a str>,
+    endpoint: BTreeMap<&'a str, &'a str>,
     #[serde(default)]
     forward: Vec<&'a str>,
     direct: Option<Vec<&'a str>>,
@@ -1223,30 +1223,51 @@ impl<'a> From<&'a ConfigsToWriteParsing<'a>> for ConfigToSerialize<'a> {
                     keep.push(netdev_peer.name)
                 }
             }
+            keep.sort_unstable();
+            direct.sort_unstable();
             let mut forward = Vec::new();
             for (route_target, route_info) in routes_info.routes.iter() {
                 if ! route_info.internal && route_info.jump < 2 {
                     forward.push(*route_target)
                 }
             }
-            let mut endpoint = HashMap::new();
+            forward.sort_unstable();
+            let mut endpoints = BTreeMap::new();
+            let mut endpoints_appearance: HashMap<&str, usize> = HashMap::new();
             for (other_peer_name, (other_composite, _)) in value.map.iter() {
                 if other_peer_name == peer_name {
                     continue
                 }
                 for other_peer in other_composite.netdev.peers.iter() {
                     if other_peer.name == *peer_name {
-                        endpoint.insert(*other_peer_name, other_peer.endpoint.raw);
+                        endpoints.insert(*other_peer_name, other_peer.endpoint.raw);
+                        match endpoints_appearance.entry(other_peer.endpoint.raw) {
+                            std::collections::hash_map::Entry::Occupied(mut count) => *count.get_mut() += 1,
+                            std::collections::hash_map::Entry::Vacant(count) => {count.insert(1);},
+                        }
                         break
                     }
                 }
+            }
+            let mut max = None;
+            for (endpoint, appearance) in endpoints_appearance.iter() {
+                match max {
+                    Some((_, appearance_max)) => if appearance > appearance_max {
+                        max = Some((endpoint, appearance))
+                    },
+                    None => max = Some((endpoint, appearance)),
+                }
+            }
+            if let Some((endpoint, _)) = max {
+                endpoints.retain(|_, endpoint_address|endpoint_address != endpoint);
+                endpoints.insert("^neighbor", endpoint);
             }
             (*peer_name, PeerConfigToSerialize {
                 ip: network.address.into(),
                 netdev: netdev.name.into(),
                 network: network.name.into(),
                 iface: composite.iface.into(),
-                endpoint,
+                endpoint: endpoints,
                 forward,
                 direct: Some(direct),
                 keep
