@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}, str::FromStr};
 use base64::Engine;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 const LEN_CURVE25519_KEY_RAW: usize = 32;
 const LEN_CURVE25519_KEY_BASE64: usize = 44;
@@ -390,6 +390,10 @@ fn default_iface() -> String {
     "wg0".into()
 }
 
+const fn default_iface_borrowed() -> &'static str {
+    "wg0"
+}
+
 const fn default_port() -> u16 {
     51820
 }
@@ -452,6 +456,7 @@ impl NetDevKeyFile {
 
 #[derive(Debug, Default)]
 struct NetDevPeerEndpointAddress<'a> {
+    raw: &'a str,
     host: &'a str,
     v6: bool,
     port: u16
@@ -482,6 +487,7 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
     fn from_str_with_port_global(value: &'a str, port_global: u16) -> Self {
         match std::net::IpAddr::from_str(value) {
             Ok(r) => Self {
+                raw: value,
                 host: value,
                 v6: r.is_ipv6(),
                 port: port_global,
@@ -502,6 +508,7 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
                             let host = &host[1..host.len()-1];
                             if let Ok(std::net::IpAddr::V6(_)) = std::net::IpAddr::from_str(host) {
                                 return Self {
+                                    raw: value,
                                     host,
                                     v6: true,
                                     port,
@@ -509,12 +516,14 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
                             }
                         }
                         Self {
+                            raw: value,
                             host,
                             v6: false,
                             port,
                         }
                     },
                     None => Self {
+                        raw: value,
                         host: value,
                         v6: false,
                         port: port_global,
@@ -957,6 +966,14 @@ impl<'a> ConfigsToWriteParsing<'a> {
         Ok(())
     }
 
+    fn try_write_flattened<P: AsRef<Path>>(&self, dir_all: P) -> Result<()> {
+        let flattened = ConfigToSerialize::from(self);
+        let path_flattened = dir_all.as_ref().join("config.flattened.yaml");
+        let file_flattened = file_create_checked(&path_flattened)?;
+        serde_yaml::to_writer(file_flattened, &flattened)?;
+        Ok(())
+    }
+
     fn try_from_config<P: AsRef<Path>>(config: &'a Config, dir_all: P) 
         -> Result<Self> 
     {
@@ -965,6 +982,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
         create_dir_all_checked(&dir_keys)?;
         result.try_add_peers(&dir_keys, config, &config.peers, None)?;
         result.finish_routes()?;
+        result.try_write_flattened(dir_all)?;
         Ok(result)
     }
 }
@@ -1156,6 +1174,95 @@ impl<'a> ConfigsToWrite<'a> {
     }
 }
 
+type PeerListToSerialize<'a> = BTreeMap<&'a str, PeerConfigToSerialize<'a>>;
+
+#[derive(Debug, Serialize)]
+/// Config of a peer
+struct PeerConfigToSerialize<'a> {
+    ip: &'a str,
+    #[serde(default)]
+    netdev: &'a str,
+    #[serde(default)]
+    network: &'a str,
+    #[serde(default)]
+    iface: &'a str,
+    #[serde(default)]
+    endpoint: HashMap<&'a str, &'a str>,
+    #[serde(default)]
+    forward: Vec<&'a str>,
+    direct: Option<Vec<&'a str>>,
+    #[serde(default)]
+    keep: Vec<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigToSerialize<'a> {
+    #[serde(default = "default_psk")]
+    psk: bool,
+    netdev: &'a str,
+    network: &'a str,
+    #[serde(default = "default_mask")]
+    mask: u8,
+    #[serde(default = "default_iface")]
+    iface: &'a str,
+    #[serde(default = "default_port")]
+    port: u16,
+    peers: PeerListToSerialize<'a>,
+}
+
+impl<'a> From<&'a ConfigsToWriteParsing<'a>> for ConfigToSerialize<'a> {
+    fn from(value: &'a ConfigsToWriteParsing<'a>) -> Self {
+        let peers = value.map.iter().map(|(peer_name, (composite, routes_info))| {
+            let netdev = &composite.netdev;
+            let network = &composite.network;
+            let mut keep = Vec::new();
+            let mut direct = Vec::new();
+            for netdev_peer in netdev.peers.iter() {
+                direct.push(netdev_peer.name);
+                if netdev_peer.keep {
+                    keep.push(netdev_peer.name)
+                }
+            }
+            let mut forward = Vec::new();
+            for (route_target, route_info) in routes_info.routes.iter() {
+                if ! route_info.internal {
+                    forward.push(*route_target)
+                }
+            }
+            let mut endpoint = HashMap::new();
+            for (other_peer_name, (other_composite, _)) in value.map.iter() {
+                if other_peer_name == peer_name {
+                    continue
+                }
+                for other_peer in other_composite.netdev.peers.iter() {
+                    if other_peer.name == *peer_name {
+                        endpoint.insert(*other_peer_name, other_peer.endpoint.raw);
+                        break
+                    }
+                }
+            }
+            (*peer_name, PeerConfigToSerialize {
+                ip: network.address.into(),
+                netdev: netdev.name.into(),
+                network: network.name.into(),
+                iface: composite.iface.into(),
+                endpoint,
+                forward,
+                direct: Some(direct),
+                keep
+            })
+        }).collect();
+        Self {
+            psk: default_psk(),
+            netdev: Default::default(),
+            network: Default::default(),
+            mask: default_mask(),
+            iface: default_iface_borrowed(),
+            port: default_port(),
+            peers,
+        }
+    }
+}
 
 fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let mut args = std::env::args_os();
