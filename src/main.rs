@@ -576,9 +576,10 @@ impl<'a> ConfigFlattened<'a> {
         }
     }
     
-    fn simplify(&mut self) {
+    fn simplify(&mut self) -> Result<()> {
+        let peer_names: Vec<&str> = self.peers.keys().map(|name|*name).collect();
         let count_peers = self.peers.len();
-        for peer_config in self.peers.values_mut() {
+        for (peer_name, peer_config) in self.peers.iter_mut() {
             if peer_config.netdev == self.netdev {
                 peer_config.netdev = ""
             }
@@ -593,32 +594,47 @@ impl<'a> ConfigFlattened<'a> {
                 neighbor, map 
             } = &mut peer_config.endpoint 
             {
-                if map.len() == count_peers - 1 {
-                    let mut appearance = BTreeMap::new();
-                    for other_address in map.values() {
-                        match appearance.entry(*other_address) {
-                            std::collections::btree_map::Entry::Occupied(mut count) => *count.get_mut() += 1,
-                            std::collections::btree_map::Entry::Vacant(count) => {count.insert(1);},
-                        }
+                for other_name in peer_names.iter() {
+                    if other_name == peer_name {
+                        continue
                     }
-                    let mut most: Option<(&str, usize)> = None;
-                    for (address, count) in appearance.iter() {
-                        println!("Appearance of {} is {}", address, count);
-                        match most {
-                            Some((_, most_count)) => if *count > most_count {
-                                most = Some((*address, *count))
-                            },
-                            None => most = Some((*address, *count)),
-                        }
+                    if let std::collections::btree_map::Entry::Vacant(address) =  map.entry(&other_name) {
+                        address.insert("");
                     }
-                    if let Some((most_address, _)) = most {
-                        println!("Most is {}", most_address);
-                        *neighbor = most_address;
-                        map.retain(|_, address| *address != most_address);
-                        if map.is_empty() {
-                            peer_config.endpoint = PeerEndpointConfigFlattened::Plain(most_address)
-                        }
+                }
+                if map.len() != count_peers -1 {
+                    eprintln!("Endpoint map not full ({} != {} - 1), impossible",
+                        map.len(), count_peers);
+                    return Err(Error::ImpossibleLogic)
+                }
+                let mut appearance = BTreeMap::new();
+                for other_address in map.values() {
+                    match appearance.entry(*other_address) {
+                        std::collections::btree_map::Entry::Occupied(mut count) => *count.get_mut() += 1,
+                        std::collections::btree_map::Entry::Vacant(count) => {count.insert(1);},
                     }
+                }
+                let mut most: Option<(&str, usize)> = None;
+                for (address, count) in appearance.iter() {
+                    println!("Appearance of {} is {}", address, count);
+                    match most {
+                        Some((_, most_count)) => if *count > most_count {
+                            most = Some((*address, *count))
+                        },
+                        None => if ! address.is_empty() {
+                            most = Some((*address, *count))
+                        },
+                    }
+                }
+                if let Some((most_address, _)) = most {
+                    println!("Most is {}", most_address);
+                    *neighbor = most_address;
+                    map.retain(|_, address| *address != most_address);
+                    if map.is_empty() {
+                        peer_config.endpoint = PeerEndpointConfigFlattened::Plain(most_address)
+                    }
+                } else {
+                    map.retain(|_, address| !address.is_empty())
                 }
             }
             if let Some(direct) = &peer_config.direct {
@@ -627,12 +643,14 @@ impl<'a> ConfigFlattened<'a> {
                 }
             }
         }
-
+        Ok(())
     }
 }
 
-impl<'a> From<&'a Config> for ConfigFlattened<'a> {
-    fn from(value: &'a Config) -> Self {
+impl<'a> TryFrom<&'a Config> for ConfigFlattened<'a> {
+    type Error = Error;
+    
+    fn try_from(value: &'a Config) -> Result<Self> {
         let mut config_flattened = Self {
             psk: value.psk,
             netdev: &value.netdev,
@@ -643,8 +661,8 @@ impl<'a> From<&'a Config> for ConfigFlattened<'a> {
             peers: Default::default(),
         };
         config_flattened.add_peers(&value.peers, "");
-        config_flattened.simplify();
-        config_flattened
+        config_flattened.simplify()?;
+        Ok(config_flattened)
     }
 }
 
@@ -1420,7 +1438,7 @@ fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let mut file = file_open_checked(&args.config)?;
     let config: Config = yaml_from_reader_checked(&mut file)?;
     if ! args.flatten.is_empty() {
-        let config_flattened = ConfigFlattened::from(&config);
+        let config_flattened = ConfigFlattened::try_from(&config)?;
         serde_yaml::to_writer(file_create_checked(&args.flatten)?, &config_flattened)?
     }
     let configs_to_write = 
