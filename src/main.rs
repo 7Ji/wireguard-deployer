@@ -577,9 +577,8 @@ impl<'a> ConfigFlattened<'a> {
     }
     
     fn simplify(&mut self) -> Result<()> {
-        let peer_names: Vec<&str> = self.peers.keys().map(|name|*name).collect();
         let count_peers = self.peers.len();
-        for (peer_name, peer_config) in self.peers.iter_mut() {
+        for peer_config in self.peers.values_mut() {
             if peer_config.netdev == self.netdev {
                 peer_config.netdev = ""
             }
@@ -594,18 +593,8 @@ impl<'a> ConfigFlattened<'a> {
                 neighbor, map 
             } = &mut peer_config.endpoint 
             {
-                for other_name in peer_names.iter() {
-                    if other_name == peer_name {
-                        continue
-                    }
-                    if let std::collections::btree_map::Entry::Vacant(address) =  map.entry(&other_name) {
-                        address.insert("");
-                    }
-                }
                 if map.len() != count_peers -1 {
-                    eprintln!("Endpoint map not full ({} != {} - 1), impossible",
-                        map.len(), count_peers);
-                    return Err(Error::ImpossibleLogic)
+                    continue
                 }
                 let mut appearance = BTreeMap::new();
                 for other_address in map.values() {
@@ -634,6 +623,7 @@ impl<'a> ConfigFlattened<'a> {
                         peer_config.endpoint = PeerEndpointConfigFlattened::Plain(most_address)
                     }
                 } else {
+                    *neighbor = "";
                     map.retain(|_, address| !address.is_empty())
                 }
             }
