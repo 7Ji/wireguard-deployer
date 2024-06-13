@@ -447,7 +447,7 @@ struct Config {
 enum PeerEndpointConfigFlattened<'a> {
     Plain (&'a str),
     Multi {
-        #[serde(default, rename = "^neighbor")]
+        #[serde(default, rename = "^neighbor", skip_serializing_if = "str::is_empty")]
         neighbor: &'a str,
         #[serde(flatten)]
         map: BTreeMap<&'a str, &'a str>,
@@ -479,8 +479,8 @@ struct PeerConfigFlattened<'a> {
     endpoint: PeerEndpointConfigFlattened<'a>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     forward: Vec<&'a str>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    direct: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct: Option<Vec<&'a str>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     keep: Vec<&'a str>,
 }
@@ -507,10 +507,6 @@ fn vec_str_from_vec_string(owned: &Vec<String>) -> Vec<&str> {
     owned.iter().map(|value|value.as_str()).collect()
 }
 
-fn btree_map_str_str_from_string_string(owned: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
-    owned.iter().map(|(key, value)|(key.as_str(), value.as_str())).collect()
-}
-
 impl<'a> ConfigFlattened<'a> {
     fn add_peer(&mut self, peer_name: &'a str, peer_config: &'a PeerConfig, neighbors: &[&'a str], parent_name: &'a str) {
         let peer_config_flattened = PeerConfigFlattened {
@@ -521,18 +517,28 @@ impl<'a> ConfigFlattened<'a> {
             endpoint: match &peer_config.endpoint {
                 PeerEndpointConfig::Plain(endpoint) => PeerEndpointConfigFlattened::Plain(endpoint.as_str()),
                 PeerEndpointConfig::Multi { parent, neighbor, child, map } => {
-                    let mut map = btree_map_str_str_from_string_string(map);
+                    let mut map_flattened = BTreeMap::<&str, &str>::new();
                     if ! parent.is_empty() && ! parent_name.is_empty() {
-                        map.insert(parent_name, parent);
+                        map_flattened.insert(parent_name, parent);
+                    }
+                    if ! neighbor.is_empty() {
+                        for neighbor_name in neighbors.iter() {
+                            if *neighbor_name != peer_name {
+                                map_flattened.insert(neighbor_name, neighbor);
+                            }
+                        }
                     }
                     if ! child.is_empty() {
                         for child_name in peer_config.children.keys() {
-                            map.insert(child_name, child);
+                            map_flattened.insert(child_name, child);
                         }
                     }
+                    for (name, address) in map.iter() {
+                        map_flattened.insert(name, address);
+                    }
                     PeerEndpointConfigFlattened::Multi {
-                        neighbor,
-                        map,
+                        neighbor: Default::default(),
+                        map: map_flattened,
                     }
                 },
             },
@@ -552,7 +558,7 @@ impl<'a> ConfigFlattened<'a> {
                     direct.push(parent_name)
                 }
                 direct.sort_unstable();
-                direct
+                Some(direct)
             },
             keep: vec_str_from_vec_string(&peer_config.keep),
         };
@@ -569,6 +575,60 @@ impl<'a> ConfigFlattened<'a> {
             self.add_peer(peer_name, peer_config, &neighbors, parent_name)
         }
     }
+    
+    fn simplify(&mut self) {
+        let count_peers = self.peers.len();
+        for peer_config in self.peers.values_mut() {
+            if peer_config.netdev == self.netdev {
+                peer_config.netdev = ""
+            }
+            if peer_config.network == self.network {
+                peer_config.network = ""
+            }
+            if peer_config.iface == self.iface {
+                peer_config.iface = ""
+            }
+            // Todo: endpoint
+            if let PeerEndpointConfigFlattened::Multi { 
+                neighbor, map 
+            } = &mut peer_config.endpoint 
+            {
+                if map.len() == count_peers - 1 {
+                    let mut appearance = BTreeMap::new();
+                    for other_address in map.values() {
+                        match appearance.entry(*other_address) {
+                            std::collections::btree_map::Entry::Occupied(mut count) => *count.get_mut() += 1,
+                            std::collections::btree_map::Entry::Vacant(count) => {count.insert(1);},
+                        }
+                    }
+                    let mut most: Option<(&str, usize)> = None;
+                    for (address, count) in appearance.iter() {
+                        println!("Appearance of {} is {}", address, count);
+                        match most {
+                            Some((_, most_count)) => if *count > most_count {
+                                most = Some((*address, *count))
+                            },
+                            None => most = Some((*address, *count)),
+                        }
+                    }
+                    if let Some((most_address, _)) = most {
+                        println!("Most is {}", most_address);
+                        *neighbor = most_address;
+                        map.retain(|_, address| *address != most_address);
+                        if map.is_empty() {
+                            peer_config.endpoint = PeerEndpointConfigFlattened::Plain(most_address)
+                        }
+                    }
+                }
+            }
+            if let Some(direct) = &peer_config.direct {
+                if direct.len() == count_peers - 1 {
+                    peer_config.direct = None
+                }
+            }
+        }
+
+    }
 }
 
 impl<'a> From<&'a Config> for ConfigFlattened<'a> {
@@ -583,6 +643,7 @@ impl<'a> From<&'a Config> for ConfigFlattened<'a> {
             peers: Default::default(),
         };
         config_flattened.add_peers(&value.peers, "");
+        config_flattened.simplify();
         config_flattened
     }
 }
