@@ -275,26 +275,51 @@ peers:
 **(global options would be omitted in following examples)**
 
 A simple star setup could be defined as follows, (i.e. single router/server + multiple clients), note each "client" can only access the parent "server", and to access other clients the traffic need to go through the parent.
-```yaml
-peers:
-  server:
-    ip: 192.168.66.1
-    endpoint: server.example.com
-    children:
-      clientA:
-        ip: 192.168.66.2
-        endpoint: clientA.example.com
-        direct: []
-      clientB:
-        ip: 192.168.66.3
-        endpoint: clientB.example.com
-        direct: []
-      clientC:
-        ip: 192.168.66.4
-        endpoint: clientC.example.com
-        direct: []
+- Multi-Layered:
+  ```yaml
+  peers:
+    server:
+      ip: 192.168.66.1
+      endpoint: server.example.com
+      children:
+        clientA:
+          ip: 192.168.66.2
+          endpoint: clientA.example.com
+          direct: []
+        clientB:
+          ip: 192.168.66.3
+          endpoint: clientB.example.com
+          direct: []
+        clientC:
+          ip: 192.168.66.4
+          endpoint: clientC.example.com
+          direct: []
         ....
-```
+  ```
+- Single-layered
+  ```yaml
+  peers:
+    server:
+      ip: 192.168.66.1
+      endpoint: server.example.com
+    clientA:
+      ip: 192.168.66.2
+      endpoint: clientA.example.com
+      direct:
+      - server
+    clientB:
+      ip: 192.168.66.3
+      endpoint: clientB.example.com
+      direct:
+      - server
+    clientC:
+      ip: 192.168.66.4
+      endpoint: clientC.example.com
+      direct:
+      - server
+    ....
+  ```
+
 A single layer star + mesh setup could be defined as follows, where "clients" in a "star" network can access each other just like in a full-mesh network. 
 ```yaml
 peers:
@@ -337,46 +362,113 @@ peers:
   ....
 ```
 A multi layer full mesh + star hybrid setup, where siteA + siteB + siteC + siteD function all as "VPN site", but traffic behind siteD need to go through it in wireguard, instead of forwarding the lan traffic directly, this is useful if the network behind siteD is not trustworthy (i.e. public network for a personal wireguard network). An example traffic line with the following config is `192.168.100.23 -> siteA (192.168.100.1 + 192.168.66.2) -> siteD (192.168.66.5) -> hostA (192.168.66.51 + 172.16.14.1) -> 172.16.14.14`
-```yaml
-peers:
-  siteA:
-    ip: 192.168.66.2
-    endpoint: siteA.example.com
-    forward:
+- Multi-Layered:
+  ```yaml
+  peers:
+    siteA:
+      ip: 192.168.66.2
+      endpoint: siteA.example.com
+      forward:
+        - 192.168.100.0/24
+        - 10.19.0.0/16
+    siteB:
+      ip: 192.168.66.3
+      endpoint: siteB.example.com
+      forward:
+        - 192.168.102.0/24
+        - fdb5:c701:19a6::/48
+    siteC:
+      ip: 192.168.66.4
+      endpoint: siteC.example.com
+      forward:
+        - 192.168.105.0/24
+        - fd60:c3e0:a2d7::/48
+    siteD:
+      ip: 192.168.66.5
+      endpoint:
+        ^neighbor: siteD.example.com
+        ^child: siteD.lan
+      children:
+        hostA:
+          ip: 192.168.66.51
+          endpoint: hostA.lan
+          forward:
+            - 172.16.14.0/24
+            - 172.16.16.0/24
+        hostB:
+          ip: 192.168.66.52
+          endpoint: hostB.lan
+        hostC:
+          ip: 192.168.66.53
+          endpoint: hostC.lan
+    ....
+  ```
+- Single-layered:
+  ```yaml
+  peers:
+    hostA:
+      ip: 192.168.66.51
+      endpoint: hostA.lan
+      forward:
+      - 172.16.14.0/24
+      - 172.16.16.0/24
+      direct:
+      - hostB
+      - hostC
+      - siteD
+    hostB:
+      ip: 192.168.66.52
+      endpoint: hostB.lan
+      direct:
+      - hostA
+      - hostC
+      - siteD
+    hostC:
+      ip: 192.168.66.53
+      endpoint: hostC.lan
+      direct:
+      - hostA
+      - hostB
+      - siteD
+    siteA:
+      ip: 192.168.66.2
+      endpoint: siteA.example.com
+      forward:
       - 192.168.100.0/24
       - 10.19.0.0/16
-  siteB:
-    ip: 192.168.66.3
-    endpoint: siteB.example.com
-    forward:
+      direct:
+      - siteB
+      - siteC
+      - siteD
+    siteB:
+      ip: 192.168.66.3
+      endpoint: siteB.example.com
+      forward:
       - 192.168.102.0/24
       - fdb5:c701:19a6::/48
-  siteC:
-    ip: 192.168.66.4
-    endpoint: siteC.example.com
-    forward:
+      direct:
+      - siteA
+      - siteC
+      - siteD
+    siteC:
+      ip: 192.168.66.4
+      endpoint: siteC.example.com
+      forward:
       - 192.168.105.0/24
       - fd60:c3e0:a2d7::/48
-  siteD:
-    ip: 192.168.66.5
-    endpoint:
-      ^neighbor: siteD.example.com
-      ^child: siteD.lan
-    children:
-      hostA:
-        ip: 192.168.66.51
-        endpoint: hostA.lan
-        forward:
-          - 172.16.14.0/24
-          - 172.16.16.0/24
-      hostB:
-        ip: 192.168.66.52
-        endpoint: hostB.lan
-      hostC:
-        ip: 192.168.66.53
-        endpoint: hostC.lan
-  ....
-```
+      direct:
+      - siteA
+      - siteB
+      - siteD
+    siteD:
+      ip: 192.168.66.5
+      endpoint:
+        ^neighbor: siteD.example.com
+        hostA: siteD.lan
+        hostB: siteD.lan
+        hostC: siteD.lan
+    ....
+  ```
 
 ## See also
 [sd-networkd-wg-ddns](https://github.com/7Ji/sd-networkd-wg-ddns), systemd-networkd wireguard netdev endpoints DynDNS updater. Use it to actively monitor for wireguard peers with endpoints that're set up using domain name instead of plain IPs, and update them in case DNS record updated.

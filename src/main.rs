@@ -35,7 +35,6 @@ enum Error {
     FormatError (String),
     ImpossibleLogic,
     IoError (String),
-    // TarError (String),
     YAMLError (String),
 }
 
@@ -588,7 +587,6 @@ impl<'a> ConfigFlattened<'a> {
             if peer_config.iface == self.iface {
                 peer_config.iface = ""
             }
-            // Todo: endpoint
             if let PeerEndpointConfigFlattened::Multi { 
                 neighbor, map 
             } = &mut peer_config.endpoint 
@@ -605,7 +603,6 @@ impl<'a> ConfigFlattened<'a> {
                 }
                 let mut most: Option<(&str, usize)> = None;
                 for (address, count) in appearance.iter() {
-                    println!("Appearance of {} is {}", address, count);
                     match most {
                         Some((_, most_count)) => if *count > most_count {
                             most = Some((*address, *count))
@@ -616,7 +613,6 @@ impl<'a> ConfigFlattened<'a> {
                     }
                 }
                 if let Some((most_address, _)) = most {
-                    println!("Most is {}", most_address);
                     map.retain(|_, address| *address != most_address);
                     if map.is_empty() {
                         peer_config.endpoint = PeerEndpointConfigFlattened::Plain(most_address)
@@ -855,7 +851,6 @@ type RoutesMap<'a> = BTreeMap<&'a str, RouteInfo<'a>>;
 
 #[derive(Debug, Default)]
 struct RoutesInfo<'a> {
-    // parent: &'a str,
     nexts: Vec<(&'a str, usize)>,
     routes: RoutesMap<'a>
 }
@@ -1183,7 +1178,6 @@ impl<'a> ConfigsToWriteParsing<'a> {
         for (_peer_name, (composite_config, routes_info)) in 
             self.map.iter_mut() 
         {
-            // let mut peers_map = HashMap::new();
             for (route_target, route_info) in routes_info.routes.iter() {
                 if route_info.jump > 1 {
                     if ! route_info.internal {
@@ -1196,7 +1190,6 @@ impl<'a> ConfigsToWriteParsing<'a> {
                         }
                     }
                 }
-                // println!("{} to {} via {} jump {}", peer_name, route_target, route_info.via, route_info.jump)
             }
         }
         Ok(())
@@ -1335,7 +1328,6 @@ impl<'a> ConfigsToWrite<'a> {
         let dir_configs = dir_all.as_ref().join("configs");
         let _ = remove_dir_all(&dir_configs);
         create_dir_all_checked(&dir_configs)?;
-        // create_dir_all_checked(dir_keys)?;
         let mtime = match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
             Ok(mtime) => mtime.as_secs(),
             Err(e) => {
@@ -1424,7 +1416,7 @@ struct Arguments {
     deploy: String,
 }
 
-fn main() -> Result<()> { // arg1: config file, arg2: output dir
+fn main() -> Result<()> {
     let args: Arguments = clap::Parser::parse();
     let mut file = file_open_checked(&args.config)?;
     let config: Config = yaml_from_reader_checked(&mut file)?;
