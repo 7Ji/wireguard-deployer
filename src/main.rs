@@ -617,10 +617,11 @@ impl<'a> ConfigFlattened<'a> {
                 }
                 if let Some((most_address, _)) = most {
                     println!("Most is {}", most_address);
-                    *neighbor = most_address;
                     map.retain(|_, address| *address != most_address);
                     if map.is_empty() {
                         peer_config.endpoint = PeerEndpointConfigFlattened::Plain(most_address)
+                    } else {
+                        *neighbor = most_address;
                     }
                 } else {
                     *neighbor = "";
