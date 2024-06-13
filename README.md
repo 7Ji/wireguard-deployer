@@ -20,9 +20,10 @@ Arguments:
   <DEPLOY>  Path to folder that configs and keys shall be cached from and deployed into
 
 Options:
-  -f, --flatten  Create a flattened config in deployed dir for backup
-  -r, --rawkey   Cache keys as raw bytes instead of base64, saves a few bytes, useful if you don't need to check the content of keys
-  -h, --help     Print help
+  -f, --flatten <FLATTEN>  Create a flattened config [default: ]
+  -r, --rawkey             Cache keys as raw bytes instead of base64, saves a few bytes, useful if you don't need to check the content of keys
+  -h, --help               Print help
+
 ```
 
 in which:
@@ -49,134 +50,20 @@ example.d
 │   │           ├── pre-shared-hostA-vmC
 │   │           └── private-hostA
 │   ├── hostA.tar
-│   ├── hostB
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostB-siteC
-│   │           └── private-hostB
-│   ├── hostB.tar
-│   ├── hostC
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostC-siteC
-│   │           └── private-hostC
-│   ├── hostC.tar
-│   ├── hostD
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostD-siteC
-│   │           └── private-hostD
-│   ├── hostD.tar
-│   ├── hostE
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostE-siteC
-│   │           └── private-hostE
-│   ├── hostE.tar
-│   ├── siteA
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-siteA-siteB
-│   │           ├── pre-shared-siteA-siteC
-│   │           └── private-siteA
-│   ├── siteA.tar
-│   ├── siteB
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-siteA-siteB
-│   │           ├── pre-shared-siteB-siteC
-│   │           └── private-siteB
-│   ├── siteB.tar
-│   ├── siteC
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostA-siteC
-│   │           ├── pre-shared-hostB-siteC
-│   │           ├── pre-shared-hostC-siteC
-│   │           ├── pre-shared-hostD-siteC
-│   │           ├── pre-shared-hostE-siteC
-│   │           ├── pre-shared-siteA-siteC
-│   │           ├── pre-shared-siteB-siteC
-│   │           └── private-siteC
-│   ├── siteC.tar
-│   ├── vmA
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostA-vmA
-│   │           ├── pre-shared-vmA-vmB
-│   │           ├── pre-shared-vmA-vmC
-│   │           └── private-vmA
-│   ├── vmA.tar
-│   ├── vmB
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostA-vmB
-│   │           ├── pre-shared-vmA-vmB
-│   │           ├── pre-shared-vmB-vmC
-│   │           └── private-vmB
-│   ├── vmB.tar
-│   ├── vmC
-│   │   ├── 30-wireguard.netdev
-│   │   ├── 40-wireguard.network
-│   │   └── keys
-│   │       └── wg
-│   │           ├── pre-shared-hostA-vmC
-│   │           ├── pre-shared-vmA-vmC
-│   │           ├── pre-shared-vmB-vmC
-│   │           └── private-vmC
+│   ├── ...
 │   └── vmC.tar
 └── keys
     ├── pre-shared-hostA-siteC
-    ├── pre-shared-hostA-vmA
-    ├── pre-shared-hostA-vmB
-    ├── pre-shared-hostA-vmC
-    ├── pre-shared-hostB-siteC
-    ├── pre-shared-hostC-siteC
-    ├── pre-shared-hostD-siteC
-    ├── pre-shared-hostE-siteC
-    ├── pre-shared-siteA-siteB
-    ├── pre-shared-siteA-siteC
-    ├── pre-shared-siteB-siteC
-    ├── pre-shared-vmA-vmB
-    ├── pre-shared-vmA-vmC
-    ├── pre-shared-vmB-vmC
-    ├── private-hostA
-    ├── private-hostB
-    ├── private-hostC
-    ├── private-hostD
-    ├── private-hostE
-    ├── private-siteA
-    ├── private-siteB
-    ├── private-siteC
-    ├── private-vmA
-    ├── private-vmB
+    ├── ...
     └── private-vmC
 ```
 In which the .tar file already contains a sane permissioon and ownership setup:
 ```
-> tar -tvf example.d/configs/mi3.tar
+> tar -tvf example.d/configs/hostA.tar
 drwxr-x--- root/systemd-network 0 2024-06-10 12:59 keys
 drwxr-x--- root/systemd-network 0 2024-06-10 12:59 keys/wg
--rw-r----- root/systemd-network 44 2024-06-10 12:59 keys/wg/private-mi3
--rw-r----- root/systemd-network 44 2024-06-10 12:59 keys/wg/pre-shared-hk1-mi3
+-rw-r----- root/systemd-network 44 2024-06-10 12:59 keys/wg/private-hostA
+-rw-r----- root/systemd-network 44 2024-06-10 12:59 keys/wg/pre-shared-hostA-hostB
 -rw-r--r-- root/root           706 2024-06-10 12:59 30-wireguard.netdev
 -rw-r--r-- root/root           327 2024-06-10 12:59 40-wireguard.network
 ```
@@ -184,11 +71,11 @@ Consider plain folders as quick lookup reference. It's recommended to use the .t
 
 You can deploy it however as you like. For a quick example, use the helper script to deploy the config to SSH remotes:
 ```
-./script/deploy-to-ssh.sh example.d hk1 l3a cm2 r33 mi3 v7j vbt vdb fuo:fuo.fuckblizzard.com pdh:pdh.fuckblizzard.com
+./script/deploy-to-ssh.sh example.d vmA vmB vmC hostA siteC:siteC.example.com ...
 ```
 On a host where the tar file is already available (e.g. on current host), you can deploy it as follows:
 ```
-sudo tar -C /etc/systemd/network -xvf example.d/configs/rz5.tar
+sudo tar -C /etc/systemd/network -xvf example.d/configs/self.tar
 sudo systemctl restart systemd-networkd
 ```
 
