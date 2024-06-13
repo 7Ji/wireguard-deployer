@@ -25,7 +25,6 @@ const LEN_CURVE25519_KEY_BASE64: usize = 44;
 
 #[derive(Debug)]
 enum Error {
-    ArgumentNotRight,
     Base64EncodeBufferTooSmall,
     Base64LengthIncorrect {
         expected: usize, actual: usize
@@ -80,7 +79,6 @@ impl_from_error_display!(std::fmt::Error, FormatError);
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::ArgumentNotRight => write!(f, "Argument not right"),
             Error::Base64EncodeBufferTooSmall => 
                 write!(f, "Base64 encode buffer too small"),
             Error::Base64LengthIncorrect { expected, actual } => 
@@ -232,7 +230,7 @@ impl WireGuardKey {
     }
 
     /// Write this key to file, without encoding
-    fn _to_file_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    fn to_file_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         write_all_checked(
             &mut file_create_checked(path)?, &self.value)
     }
@@ -254,7 +252,7 @@ impl WireGuardKey {
     }
 
     /// Read from file, in which a key is stored as raw un-encoded bytes
-    fn _from_file_raw<P: AsRef<Path>>(path: P) -> Result<Self> {
+    fn from_file_raw<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut value = Self::new_empty_raw();
         read_exact_checked(
             &mut file_open_checked(path)?, &mut value)?;
@@ -262,12 +260,12 @@ impl WireGuardKey {
     }
 
     /// Read from file if it exists, otherwise generate a new one
-    fn _from_file_raw_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    fn from_file_raw_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
         if path.as_ref().exists() {
-            return Self::_from_file_raw(path)
+            return Self::from_file_raw(path)
         }
         let key = Self::new();
-        key._to_file_raw(path)?;
+        key.to_file_raw(path)?;
         Ok(key)
     }
 
@@ -440,15 +438,19 @@ impl NetDevKeyFile {
     fn _base64_string(&self) -> String {
         self.raw.base64_string()
     }
-    fn from_dir_keys_or_new(dir_keys: &Path, name: String) -> Result<Self> {
-        let raw = WireGuardKey::from_file_base64_or_new(dir_keys.join(&name))?;
+    fn from_dir_keys_or_new(dir_keys: &Path, name: String, raw: bool) -> Result<Self> {
+        let raw = if raw {
+            WireGuardKey::from_file_raw_or_new(dir_keys.join(&name))
+        } else {
+            WireGuardKey::from_file_base64_or_new(dir_keys.join(&name))
+        }?;
         Ok(NetDevKeyFile { raw, name })
     }
     fn pubkey(&self) -> WireGuardKey {
         self.raw.pubkey()
     }
-    fn from_dir_keys_with_pubkey_or_new(dir_keys: &Path, name: String) -> Result<(Self, WireGuardKey)> {
-        let key_file = Self::from_dir_keys_or_new(dir_keys, name)?;
+    fn from_dir_keys_with_pubkey_or_new(dir_keys: &Path, name: String, raw: bool) -> Result<(Self, WireGuardKey)> {
+        let key_file = Self::from_dir_keys_or_new(dir_keys, name, raw)?;
         let pubkey = key_file.pubkey();
         Ok((key_file, pubkey))
     }
@@ -748,7 +750,8 @@ struct ConfigsToWriteParsing<'a> {
     map: BTreeMap<&'a str, (CompositeConfig<'a>, RoutesInfo<'a>)>,
     route_targets: Vec<&'a str>,
     keys: HashMap<&'a str, (NetDevKeyFile, WireGuardKey)>,
-    psks: HashMap<(&'a str, &'a str), NetDevKeyFile>
+    psks: HashMap<(&'a str, &'a str), NetDevKeyFile>,
+    rawkey: bool
 }
 
 impl<'a> ConfigsToWriteParsing<'a> {
@@ -764,7 +767,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
         match self.psks.entry((some, other)) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::hash_map::Entry::Vacant(entry) => 
-                Ok(entry.insert(NetDevKeyFile::from_dir_keys_or_new(dir_keys, format!("pre-shared-{}-{}", some, other))?)),
+                Ok(entry.insert(NetDevKeyFile::from_dir_keys_or_new(dir_keys, format!("pre-shared-{}-{}", some, other), self.rawkey)?)),
         }
     }
     
@@ -773,7 +776,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
         match self.keys.entry(peer) {
             std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::hash_map::Entry::Vacant(entry) =>
-                Ok(entry.insert(NetDevKeyFile::from_dir_keys_with_pubkey_or_new(dir_keys, format!("private-{}", peer))?)),
+                Ok(entry.insert(NetDevKeyFile::from_dir_keys_with_pubkey_or_new(dir_keys, format!("private-{}", peer), self.rawkey)?)),
         }
     }
 
@@ -974,15 +977,19 @@ impl<'a> ConfigsToWriteParsing<'a> {
         Ok(())
     }
 
-    fn try_from_config<P: AsRef<Path>>(config: &'a Config, dir_all: P) 
+    fn try_from_config_args(config: &'a Config, args: &Arguments) 
         -> Result<Self> 
     {
         let mut result = Self::default();
-        let dir_keys = dir_all.as_ref().join("keys");
+        result.rawkey = args.rawkey;
+        let dir_all = PathBuf::from(&args.deploy);
+        let dir_keys =  dir_all.join("keys");
         create_dir_all_checked(&dir_keys)?;
         result.try_add_peers(&dir_keys, config, &config.peers, None)?;
         result.finish_routes()?;
-        result.try_write_flattened(dir_all)?;
+        if args.flatten {
+            result.try_write_flattened(dir_all)?
+        }
         Ok(result)
     }
 }
@@ -1090,11 +1097,11 @@ impl WriterBuffer {
 }
 
 impl<'a> ConfigsToWrite<'a> {
-    fn try_from_config<P: AsRef<Path>>(config: &'a Config, dir_all: P) 
+    fn try_from_config_args(config: &'a Config, args: &Arguments) 
         -> Result<Self> 
     {
         let configs_parsing = 
-            ConfigsToWriteParsing::try_from_config(config, dir_all)?;
+            ConfigsToWriteParsing::try_from_config_args(config, args)?;
         let map = 
             configs_parsing.map.into_iter().map(
                 |(name, config)|
@@ -1285,13 +1292,32 @@ impl<'a> From<&'a ConfigsToWriteParsing<'a>> for ConfigToSerialize<'a> {
     }
 }
 
+#[derive(clap::Parser)]
+struct Arguments {
+    /// Create a flattened config in deployed dir for backup
+    #[arg(short, long, default_value_t)]
+    flatten: bool,
+
+    /// Cache keys as raw bytes instead of base64, saves a few bytes, useful
+    /// if you don't need to check the content of keys
+    #[arg(short, long, default_value_t)]
+    rawkey: bool,
+
+    /// Path to .yaml config file
+    #[arg()]
+    config: String,
+
+    /// Path to folder that configs and keys shall be cached from and deployed 
+    /// into 
+    #[arg()]
+    deploy: String,
+}
+
 fn main() -> Result<()> { // arg1: config file, arg2: output dir
-    let mut args = std::env::args_os();
-    let config = args.nth(1).ok_or(Error::ArgumentNotRight)?;
-    let output = args.next().ok_or(Error::ArgumentNotRight)?;
-    let mut file = file_open_checked(&config)?;
+    let args: Arguments = clap::Parser::parse();
+    let mut file = file_open_checked(&args.config)?;
     let config: Config = yaml_from_reader_checked(&mut file)?;
     let configs_to_write = 
-        ConfigsToWrite::try_from_config(&config, &output)?;
-    configs_to_write.try_write(&output)
+        ConfigsToWrite::try_from_config_args(&config, &args)?;
+    configs_to_write.try_write(&args.deploy)
 }
