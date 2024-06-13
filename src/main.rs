@@ -625,7 +625,6 @@ impl NetDevKeyFile {
 
 #[derive(Debug, Default)]
 struct NetDevPeerEndpointAddress<'a> {
-    raw: &'a str,
     host: &'a str,
     v6: bool,
     port: u16
@@ -656,7 +655,6 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
     fn from_str_with_port_global(value: &'a str, port_global: u16) -> Self {
         match std::net::IpAddr::from_str(value) {
             Ok(r) => Self {
-                raw: value,
                 host: value,
                 v6: r.is_ipv6(),
                 port: port_global,
@@ -677,7 +675,6 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
                             let host = &host[1..host.len()-1];
                             if let Ok(std::net::IpAddr::V6(_)) = std::net::IpAddr::from_str(host) {
                                 return Self {
-                                    raw: value,
                                     host,
                                     v6: true,
                                     port,
@@ -685,14 +682,12 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
                             }
                         }
                         Self {
-                            raw: value,
                             host,
                             v6: false,
                             port,
                         }
                     },
                     None => Self {
-                        raw: value,
                         host: value,
                         v6: false,
                         port: port_global,
