@@ -294,7 +294,7 @@ enum PeerEndpointConfig {
         #[serde(default, rename = "^child")]
         child: String,
         #[serde(flatten)]
-        map: HashMap<String, String>,
+        map: BTreeMap<String, String>,
     }
 }
 
@@ -376,24 +376,44 @@ struct PeerConfig {
     children: PeerList
 }
 
+const DEFAULT_PSK: bool = true;
+
 const fn default_psk() -> bool {
-    true
+    DEFAULT_PSK
 }
+
+const fn is_default_psk(psk: &bool) -> bool {
+    *psk == DEFAULT_PSK
+}
+
+const DEFAULT_MASK: u8 = 24;
 
 const fn default_mask() -> u8 {
-    24
+    DEFAULT_MASK
 }
+
+const fn is_default_mask(mask: &u8) -> bool {
+    *mask == DEFAULT_MASK
+}
+
+const DEFAULT_IFACE: &'static str = "wg0";
 
 fn default_iface() -> String {
-    "wg0".into()
+    DEFAULT_IFACE.into()
 }
 
-const fn default_iface_borrowed() -> &'static str {
-    "wg0"
+fn is_default_iface(iface: &str) -> bool {
+    iface == DEFAULT_IFACE
 }
+
+const DEFAULT_PORT: u16 = 51820;
 
 const fn default_port() -> u16 {
-    51820
+    DEFAULT_PORT
+}
+
+const fn is_default_port(port: &u16) -> bool {
+    *port == DEFAULT_PORT
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,6 +440,153 @@ struct Config {
     /// The list of peers
     peers: PeerList,
 }
+
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum PeerEndpointConfigFlattened<'a> {
+    Plain (&'a str),
+    Multi {
+        #[serde(default, rename = "^neighbor")]
+        neighbor: &'a str,
+        #[serde(flatten)]
+        map: BTreeMap<&'a str, &'a str>,
+    }
+}
+
+impl<'a> PeerEndpointConfigFlattened<'a> {
+    fn is_empty(&self) -> bool {
+        match self {
+            PeerEndpointConfigFlattened::Plain(endpoint) => endpoint.is_empty(),
+            PeerEndpointConfigFlattened::Multi { neighbor, map } => 
+                neighbor.is_empty() && map.is_empty(),
+        }
+    }
+}
+
+
+#[derive(Debug, Serialize)]
+/// Config of a peer
+struct PeerConfigFlattened<'a> {
+    ip: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    netdev: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    network: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    iface: &'a str,
+    #[serde(skip_serializing_if = "PeerEndpointConfigFlattened::is_empty")]
+    endpoint: PeerEndpointConfigFlattened<'a>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    forward: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    direct: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    keep: Vec<&'a str>,
+}
+
+type PeerListFlattened<'a> = BTreeMap<&'a str, PeerConfigFlattened<'a>>;
+
+#[derive(Debug, Serialize)]
+struct ConfigFlattened<'a> {
+    #[serde(skip_serializing_if = "is_default_psk")]
+    psk: bool,
+    netdev: &'a str,
+    network: &'a str,
+    #[serde(skip_serializing_if = "is_default_mask")]
+    mask: u8,
+    #[serde(skip_serializing_if = "is_default_iface")]
+    iface: &'a str,
+    #[serde(skip_serializing_if = "is_default_port")]
+    port: u16,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    peers: PeerListFlattened<'a>,
+}
+
+fn vec_str_from_vec_string(owned: &Vec<String>) -> Vec<&str> {
+    owned.iter().map(|value|value.as_str()).collect()
+}
+
+fn btree_map_str_str_from_string_string(owned: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
+    owned.iter().map(|(key, value)|(key.as_str(), value.as_str())).collect()
+}
+
+impl<'a> ConfigFlattened<'a> {
+    fn add_peer(&mut self, peer_name: &'a str, peer_config: &'a PeerConfig, neighbors: &[&'a str], parent_name: &'a str) {
+        let peer_config_flattened = PeerConfigFlattened {
+            ip: &peer_config.ip,
+            netdev: &peer_config.netdev,
+            network: &peer_config.network,
+            iface: &peer_config.iface,
+            endpoint: match &peer_config.endpoint {
+                PeerEndpointConfig::Plain(endpoint) => PeerEndpointConfigFlattened::Plain(endpoint.as_str()),
+                PeerEndpointConfig::Multi { parent, neighbor, child, map } => {
+                    let mut map = btree_map_str_str_from_string_string(map);
+                    if ! parent.is_empty() && ! parent_name.is_empty() {
+                        map.insert(parent_name, parent);
+                    }
+                    if ! child.is_empty() {
+                        for child_name in peer_config.children.keys() {
+                            map.insert(child_name, child);
+                        }
+                    }
+                    PeerEndpointConfigFlattened::Multi {
+                        neighbor,
+                        map,
+                    }
+                },
+            },
+            forward: vec_str_from_vec_string(&peer_config.forward),
+            direct: {
+                let mut direct = match &peer_config.direct {
+                    Some(direct) => 
+                        vec_str_from_vec_string(direct),
+                    None => neighbors.iter().filter_map(|neighbor|
+                        if *neighbor == peer_name {None} else {Some(*neighbor)}
+                    ).collect(),
+                };
+                for child_name in peer_config.children.keys() {
+                    direct.push(child_name.as_str())
+                }
+                if ! parent_name.is_empty() {
+                    direct.push(parent_name)
+                }
+                direct.sort_unstable();
+                direct
+            },
+            keep: vec_str_from_vec_string(&peer_config.keep),
+        };
+        self.peers.insert(peer_name, peer_config_flattened);
+        if peer_config.children.is_empty() {
+            return
+        }
+        self.add_peers(&peer_config.children, &peer_name)
+    }
+
+    fn add_peers(&mut self, peers_list: &'a PeerList, parent_name: &'a str) {
+        let neighbors: Vec<&'a str> = peers_list.keys().map(|neighbor|neighbor.as_str()).collect();
+        for (peer_name, peer_config) in peers_list.iter() {
+            self.add_peer(peer_name, peer_config, &neighbors, parent_name)
+        }
+    }
+}
+
+impl<'a> From<&'a Config> for ConfigFlattened<'a> {
+    fn from(value: &'a Config) -> Self {
+        let mut config_flattened = Self {
+            psk: value.psk,
+            netdev: &value.netdev,
+            network: &value.network,
+            mask: value.mask,
+            iface: &value.iface,
+            port: value.port,
+            peers: Default::default(),
+        };
+        config_flattened.add_peers(&value.peers, "");
+        config_flattened
+    }
+}
+
 
 /// A wireguard key in netdev that shall be stored in a file
 #[derive(Clone, Debug, Default)]
@@ -832,6 +999,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                     for (child_name, child_config) in peer_config.children.iter() {
                         add_peer!(child_name, child_config, child_config.endpoint.get(peer_name, PeerEndpointCharacter::Parent))
                     }
+                    peers.sort_unstable_by_key(|netdev_peer|netdev_peer.name);
                     peers
                 },
             },
@@ -969,14 +1137,6 @@ impl<'a> ConfigsToWriteParsing<'a> {
         Ok(())
     }
 
-    fn try_write_flattened<P: AsRef<Path>>(&self, dir_all: P) -> Result<()> {
-        let flattened = ConfigToSerialize::from(self);
-        let path_flattened = dir_all.as_ref().join("config.flattened.yaml");
-        let file_flattened = file_create_checked(&path_flattened)?;
-        serde_yaml::to_writer(file_flattened, &flattened)?;
-        Ok(())
-    }
-
     fn try_from_config_args(config: &'a Config, args: &Arguments) 
         -> Result<Self> 
     {
@@ -987,9 +1147,6 @@ impl<'a> ConfigsToWriteParsing<'a> {
         create_dir_all_checked(&dir_keys)?;
         result.try_add_peers(&dir_keys, config, &config.peers, None)?;
         result.finish_routes()?;
-        if args.flatten {
-            result.try_write_flattened(dir_all)?
-        }
         Ok(result)
     }
 }
@@ -1181,122 +1338,11 @@ impl<'a> ConfigsToWrite<'a> {
     }
 }
 
-type PeerListToSerialize<'a> = BTreeMap<&'a str, PeerConfigToSerialize<'a>>;
-
-#[derive(Debug, Serialize)]
-/// Config of a peer
-struct PeerConfigToSerialize<'a> {
-    ip: &'a str,
-    #[serde(default)]
-    netdev: &'a str,
-    #[serde(default)]
-    network: &'a str,
-    #[serde(default)]
-    iface: &'a str,
-    #[serde(default)]
-    endpoint: BTreeMap<&'a str, &'a str>,
-    #[serde(default)]
-    forward: Vec<&'a str>,
-    direct: Option<Vec<&'a str>>,
-    #[serde(default)]
-    keep: Vec<&'a str>,
-}
-
-#[derive(Debug, Serialize)]
-struct ConfigToSerialize<'a> {
-    #[serde(default = "default_psk")]
-    psk: bool,
-    netdev: &'a str,
-    network: &'a str,
-    #[serde(default = "default_mask")]
-    mask: u8,
-    #[serde(default = "default_iface")]
-    iface: &'a str,
-    #[serde(default = "default_port")]
-    port: u16,
-    peers: PeerListToSerialize<'a>,
-}
-
-impl<'a> From<&'a ConfigsToWriteParsing<'a>> for ConfigToSerialize<'a> {
-    fn from(value: &'a ConfigsToWriteParsing<'a>) -> Self {
-        let peers = value.map.iter().map(|(peer_name, (composite, routes_info))| {
-            let netdev = &composite.netdev;
-            let network = &composite.network;
-            let mut keep = Vec::new();
-            let mut direct = Vec::new();
-            for netdev_peer in netdev.peers.iter() {
-                direct.push(netdev_peer.name);
-                if netdev_peer.keep {
-                    keep.push(netdev_peer.name)
-                }
-            }
-            keep.sort_unstable();
-            direct.sort_unstable();
-            let mut forward = Vec::new();
-            for (route_target, route_info) in routes_info.routes.iter() {
-                if ! route_info.internal && route_info.jump < 2 {
-                    forward.push(*route_target)
-                }
-            }
-            forward.sort_unstable();
-            let mut endpoints = BTreeMap::new();
-            let mut endpoints_appearance: HashMap<&str, usize> = HashMap::new();
-            for (other_peer_name, (other_composite, _)) in value.map.iter() {
-                if other_peer_name == peer_name {
-                    continue
-                }
-                for other_peer in other_composite.netdev.peers.iter() {
-                    if other_peer.name == *peer_name {
-                        endpoints.insert(*other_peer_name, other_peer.endpoint.raw);
-                        match endpoints_appearance.entry(other_peer.endpoint.raw) {
-                            std::collections::hash_map::Entry::Occupied(mut count) => *count.get_mut() += 1,
-                            std::collections::hash_map::Entry::Vacant(count) => {count.insert(1);},
-                        }
-                        break
-                    }
-                }
-            }
-            let mut max = None;
-            for (endpoint, appearance) in endpoints_appearance.iter() {
-                match max {
-                    Some((_, appearance_max)) => if appearance > appearance_max {
-                        max = Some((endpoint, appearance))
-                    },
-                    None => max = Some((endpoint, appearance)),
-                }
-            }
-            if let Some((endpoint, _)) = max {
-                endpoints.retain(|_, endpoint_address|endpoint_address != endpoint);
-                endpoints.insert("^neighbor", endpoint);
-            }
-            (*peer_name, PeerConfigToSerialize {
-                ip: network.address.into(),
-                netdev: netdev.name.into(),
-                network: network.name.into(),
-                iface: composite.iface.into(),
-                endpoint: endpoints,
-                forward,
-                direct: Some(direct),
-                keep
-            })
-        }).collect();
-        Self {
-            psk: default_psk(),
-            netdev: Default::default(),
-            network: Default::default(),
-            mask: default_mask(),
-            iface: default_iface_borrowed(),
-            port: default_port(),
-            peers,
-        }
-    }
-}
-
 #[derive(clap::Parser)]
 struct Arguments {
-    /// Create a flattened config in deployed dir for backup
+    /// Create a flattened config
     #[arg(short, long, default_value_t)]
-    flatten: bool,
+    flatten: String,
 
     /// Cache keys as raw bytes instead of base64, saves a few bytes, useful
     /// if you don't need to check the content of keys
@@ -1317,6 +1363,10 @@ fn main() -> Result<()> { // arg1: config file, arg2: output dir
     let args: Arguments = clap::Parser::parse();
     let mut file = file_open_checked(&args.config)?;
     let config: Config = yaml_from_reader_checked(&mut file)?;
+    if ! args.flatten.is_empty() {
+        let config_flattened = ConfigFlattened::from(&config);
+        serde_yaml::to_writer(file_create_checked(&args.flatten)?, &config_flattened)?
+    }
     let configs_to_write = 
         ConfigsToWrite::try_from_config_args(&config, &args)?;
     configs_to_write.try_write(&args.deploy)
