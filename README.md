@@ -12,13 +12,17 @@ cargo build --release
 The ouput binary would be `target/release/sd-networkd-wg-deploy`
 
 ## Usage
-To run a built binary
 ```
-./sd-networkd-wg-deploy [config file] [to-be-deployed dir]
-```
-Alternatively, to run from the project root directly:
-```
-cargo run --release -- [config file] [to-be-deployed dir]
+Usage: sd-networkd-wg-deployer [OPTIONS] <CONFIG> <DEPLOY>
+
+Arguments:
+  <CONFIG>  Path to .yaml config file
+  <DEPLOY>  Path to folder that configs and keys shall be cached from and deployed into
+
+Options:
+  -f, --flatten  Create a flattened config in deployed dir for backup
+  -r, --rawkey   Cache keys as raw bytes instead of base64, saves a few bytes, useful if you don't need to check the content of keys
+  -h, --help     Print help
 ```
 
 in which:
@@ -189,6 +193,7 @@ sudo systemctl restart systemd-networkd
 ```
 
 ## Config
+### Format
 The config format is simple yet powerful, it's defined as follows:
 ```yaml
 psk: [bool, global pre-shared keys option, default true]
@@ -230,7 +235,24 @@ endpoint: 123.234.51.67:51820 # ipv4 as host + port
 endpoint: 1111:2222::3333 # ipv6 as host
 endpoint: "[1111:2222::3333]:51800" # ipv6 as host + port
 ```
+### Structure
+In most cases you can just use a single layer structure, and the traffic rule is as simple as:
+- A peer, if its `direct` list is not set, can connect to all other peers directly, otherwise it could only connect to the set peers directly, and traffics to other peers need to go through these set peers.
 
+This is mostly useful for a mesh setup, and a full-mesh setup is espesially simple as you can write all peers without `direct` list.
+
+While nearly all network configuration can be described in a single layer config by verbose `direct` settings, it's recommended to use a layered structure if your setup is not full-mesh and the network can be splitted into multiple subnets, connected through a single peer or multiple such peers.
+
+The traffic rules in layered structure are more complicated, but not that complicated:
+- A peer can always connect to all of its `children` directly
+- A peer can always connect to its `parent` (it being the child of) directly, essentially a reversed rule of the prior one
+- A peer, if its `direct` list is not set, can connect to all other peers in the same layer with the same parent directly (all peers in the top level are considered to have the same parent)
+
+The layered structure is mostly for a via-host style setup, e.g. all other peers using a single peer as "router" to access remaining peers. For the example usage just config the "router" as the only top-level peer, and all others as its children with empty `direct` list.
+
+As both a backup method and comparison, you can always get a flattened, single-level config file by passing `--flatten` argument to the deployer. In any cases, the flattened config would produce the same network configs as your original one.
+
+### Example
 The above may look complicated but it's in fact very simple, e.g. a simple full mesh setup could be defined as follows:
 ```yaml
 psk: true
