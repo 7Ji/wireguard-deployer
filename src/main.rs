@@ -776,6 +776,7 @@ struct NetDevPeer<'a> {
     /// The incoming IP ranges this is allowed to access, also hinting whether
     /// traffic should go through this peer if a corresponding range is found
     allowed: Vec<&'a str>,
+    has_external: bool,
     /// The public key of this peer
     pubkey: WireGuardKey,
     /// The endpoint
@@ -791,6 +792,7 @@ impl<'a> Default for NetDevPeer<'a> {
         Self { 
             name: Default::default(), 
             allowed: Default::default(), 
+            has_external: Default::default(),
             pubkey: Default::default(), 
             endpoint: Default::default(), 
             psk: Default::default(),
@@ -1043,6 +1045,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                             peers.push(NetDevPeer {
                                 name: $peer_name,
                                 allowed: Default::default(),
+                                has_external: false,
                                 pubkey: self.get_key_or_new(dir_keys, $peer_name)?.1.clone(),
                                 endpoint: NetDevPeerEndpointAddress::from_str_with_default_port($peer_endpoint, $peer_config.port.unwrap_or(config.port)),
                                 psk: if config.psk {
@@ -1193,6 +1196,9 @@ impl<'a> ConfigsToWriteParsing<'a> {
                     }
                     for netdev_peer in composite_config.netdev.peers.iter_mut() {
                         if netdev_peer.name == route_info.via {
+                            if ! route_info.internal {
+                                netdev_peer.has_external = true;
+                            }
                             netdev_peer.allowed.push(route_target);
                             break
                         }
@@ -1365,7 +1371,7 @@ impl WriterBuffer {
         self.push_str("config interface '");
         self.push_str(config.iface);
         self.push_str("'\n\toption proto 'wireguard'\n\toption private_key '");
-        self.push_str(&config.netdev.key.pubkey().base64_string());
+        self.push_str(&config.netdev.key.base64_string());
         self.push_str("'\n\tlist addresses '");
         self.push_str(config.network.address);
         self.push('/');
@@ -1384,10 +1390,16 @@ impl WriterBuffer {
                 self.push_str("'\n\toption preshared_key '");
                 self.push_str(&psk.base64_string());
             }
-            self.push_str("'\n\toption route_allowed_ips '1'\n\toption endpoint_host '");
+            if peer.has_external {
+                self.push_str("'\n\toption route_allowed_ips '1");
+            }
+            self.push_str("'\n\toption endpoint_host '");
             self.push_str(peer.endpoint.host);
             self.push_str("'\n\toption endpoint_port '");
             self.push_str(&format!("{}", peer.endpoint.port));
+            if peer.keep {
+                self.push_str("'\n\toption persistent_keepalive '25");
+            }
             for allowed in peer.allowed.iter() {
                 self.push_str("'\n\tlist allowed_ips '");
                 self.push_str(allowed);
