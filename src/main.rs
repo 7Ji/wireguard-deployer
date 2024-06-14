@@ -347,6 +347,8 @@ struct PeerConfig {
     /// be used
     #[serde(default)]
     iface: String,
+    // /// The listening port, 
+    // port: Option<u16>,
     /// The endpoint, i.e. the IP outside this network that other peers can 
     /// connect accordingly, usually a host + port pair
     #[serde(default)]
@@ -797,7 +799,7 @@ impl<'a> Default for NetDevPeer<'a> {
 #[derive(Debug, Default)]
 struct NetDevConfig<'a> {
     name: &'a str,
-    // port: u8,
+    port: u16,
     /// The private key of the netdev
     key: NetDevKeyFile,
     /// The peers
@@ -1028,7 +1030,33 @@ impl<'a> ConfigsToWriteParsing<'a> {
             iface: str_non_empty_or_global!(iface),
             netdev: NetDevConfig {
                 name: str_non_empty_or_global!(netdev),
-                // port: 
+                port: match &peer_config.endpoint {
+                    PeerEndpointConfig::Plain(address) => 
+                        NetDevPeerEndpointAddress::from_str_with_port_global(
+                            address, config.port).port,
+                    PeerEndpointConfig::Multi { 
+                        parent, neighbor, child, 
+                        map 
+                    } => {
+                        let mut port_weights = BTreeMap::new();
+                        for (address, weight) in map.values().zip(std::iter::repeat(1)).chain([(parent, 2), (neighbor, 3), (child, 2)].into_iter()) {
+                            if address.is_empty() {
+                                continue
+                            }
+                            let port = NetDevPeerEndpointAddress::from_str_with_port_global(
+                                address, config.port).port;
+                            match port_weights.entry(port) {
+                                std::collections::btree_map::Entry::Occupied(mut total_weight) => *total_weight.get_mut() += weight,
+                                std::collections::btree_map::Entry::Vacant(total_weight) => {total_weight.insert(weight);},
+                            }
+                        }
+                        if let Some((port, _)) = port_weights.into_iter().max_by_key(|(_, weight)|*weight) {
+                            port
+                        } else {
+                            config.port
+                        }
+                    },
+                },
                 key: self.get_key_or_new(dir_keys, peer_name)?.0.clone(),
                 peers: {
                     let mut peers = Vec::new();
@@ -1297,8 +1325,9 @@ impl WriterBuffer {
         self.push_str("\n\
             Kind=wireguard\n\n\
             [WireGuard]\n\
-            ListenPort=51820\n\
-            PrivateKeyFile=/etc/systemd/network/keys/wg/");
+            ListenPort=");
+        self.push_str(&format!("{}", netdev.port));
+        self.push_str("\nPrivateKeyFile=/etc/systemd/network/keys/wg/");
         self.add_key_file(&netdev.key)?;
         self.push('\n');
         for peer in netdev.peers.iter() {
@@ -1363,7 +1392,9 @@ impl WriterBuffer {
         self.push_str(config.network.address);
         self.push('/');
         self.push_str(&format!("{}", config.mask));
-        self.push_str("'\n\toption listen_port '51820'\n\toption delegate '0'\n");
+        self.push_str("'\n\toption listen_port '");
+        self.push_str(&format!("{}", config.netdev.port));
+        self.push_str("'\n\toption delegate '0'\n");
         for peer in config.netdev.peers.iter() {
             self.push_str("\nconfig wireguard_");
             self.push_str(config.iface);
