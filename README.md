@@ -49,6 +49,7 @@ example.d
 │   │           ├── pre-shared-hostA-vmB
 │   │           ├── pre-shared-hostA-vmC
 │   │           └── private-hostA
+│   ├── hostA.openwrt.conf
 │   ├── hostA.tar
 │   ├── ...
 │   └── vmC.tar
@@ -87,7 +88,7 @@ psk: [bool, global pre-shared keys option, default true]
 iface: [string, optional, global interface name, default wg0]
 netdev: [string, global systemd.netdev name without suffix, e.g. 30-wireguard]
 network: [string, global systemd.network name without suffix, e.g. 40-wireguard]
-port: [unsigned integer, optional, global fallback port for host-only endpoint, default 51820]
+port: [unsigned integer, optional, global fallback listening port, default 51820]
 mask: [unsigned integer, optional, global wireguard network subnet netmask suffix, default 24]
 peers: [map of peer, top level peers]
 ```
@@ -95,6 +96,7 @@ In which, a `peer` map is defined as follows:
 ```yaml
 [string, unique peer name, e.g. siteA]:
   iface: [string, optional, peer interface name, if not set then global iface would be used, e.g. wg1]
+  port: [unsigned integer, optional, peer-specific listening port, default to global port if not set]
   netdev: [string, optional, peer systemd.netdev name without suffix, if not set then global netdev would be used, e.g. 50-wireguard-personal]
   network: [string, optional, peer systemd.network name without suffix, if not set then global network would be used, e.g. 60-wireguard-personal]
   ip: [string, wireguard network ip without subnet netmask suffix, e.g. 192.168.77.2]
@@ -113,6 +115,7 @@ endpoint:
   peerB: [string, ...]
   ...
 ```
+
 In which, endpoint addresss is a plain string in any one of the following formats:
 ```yaml
 endpoint: example.com # domain as host
@@ -122,6 +125,8 @@ endpoint: 123.234.51.67:51820 # ipv4 as host + port
 endpoint: 1111:2222::3333 # ipv6 as host
 endpoint: "[1111:2222::3333]:51800" # ipv6 as host + port
 ```
+If there's no port in an endpoint address, then it would be filled with the peer port if that's set, or global port if peer port is not set.
+
 ### Structure
 In most cases you can just use a single layer structure, and the traffic rule is as simple as:
 - A peer, if its `direct` list is not set, can connect to all other peers directly, otherwise it could only connect to the set peers directly, and traffics to other peers need to go through these set peers.
