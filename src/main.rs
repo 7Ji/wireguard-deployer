@@ -668,7 +668,7 @@ impl NetDevKeyFile {
     fn base64(&self) -> Result<WireGuardKeyBase64> {
         self.raw.base64()
     }
-    fn _base64_string(&self) -> String {
+    fn base64_string(&self) -> String {
         self.raw.base64_string()
     }
     fn from_dir_keys_or_new(dir_keys: &Path, name: String, raw: bool) -> Result<Self> {
@@ -797,6 +797,7 @@ impl<'a> Default for NetDevPeer<'a> {
 #[derive(Debug, Default)]
 struct NetDevConfig<'a> {
     name: &'a str,
+    // port: u8,
     /// The private key of the netdev
     key: NetDevKeyFile,
     /// The peers
@@ -1027,6 +1028,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
             iface: str_non_empty_or_global!(iface),
             netdev: NetDevConfig {
                 name: str_non_empty_or_global!(netdev),
+                // port: 
                 key: self.get_key_or_new(dir_keys, peer_name)?.0.clone(),
                 peers: {
                     let mut peers = Vec::new();
@@ -1214,12 +1216,14 @@ struct WriterBuffer {
     tar: tar::Builder<File>,
     mtime: u64,
     dir_config: PathBuf,
+    file_openwrt: PathBuf,
     dir_keys: PathBuf,
 }
 
 impl WriterBuffer {
     fn new(dir_configs: &Path, name: &str, mtime: u64) -> Result<Self> {
         let dir_config = dir_configs.join(name);
+        let file_openwrt = dir_configs.join(format!("{}.openwrt.conf", name));
         let dir_keys = dir_config.join("keys/wg");
         create_dir_all_checked(&dir_keys)?;
         let path_tar = dir_configs.join(format!("{}.tar", name));
@@ -1230,6 +1234,7 @@ impl WriterBuffer {
             tar,
             mtime,
             dir_config,
+            file_openwrt,
             dir_keys,
         };
         let mut header = buffer.new_tar_header_directory_keys()?;
@@ -1251,22 +1256,27 @@ impl WriterBuffer {
         Ok(header)
     }
 
+    #[inline(always)]
     fn new_tar_header_directory(&self, group: &str, mode: u32) -> Result<tar::Header> {
         self.new_tar_header(group, mode, true, 0)
     }
 
+    #[inline(always)]
     fn new_tar_header_directory_keys(&self) -> Result<tar::Header> {
         self.new_tar_header_directory("systemd-network", 0o750)
     }
 
+    #[inline(always)]
     fn new_tar_header_file(&self, group: &str, mode: u32, size: usize) -> Result<tar::Header> {
         self.new_tar_header(group, mode, false, size)
     }
 
+    #[inline(always)]
     fn new_tar_header_file_key(&self) -> Result<tar::Header> {
         self.new_tar_header_file("systemd-network", 0o640, WireGuardKey::LEN_BASE64)
     }
 
+    #[inline(always)]
     fn new_tar_header_file_config(&self, size: usize) -> Result<tar::Header> {
         self.new_tar_header_file("root", 0o644, size)
     }
@@ -1280,6 +1290,61 @@ impl WriterBuffer {
         Ok(())
     }
 
+    fn fill_netdev(&mut self, config: &CompositeConfig) -> Result<()> {
+        let netdev = &config.netdev;
+        self.push_str("[NetDev]\nName=");
+        self.push_str(&config.iface);
+        self.push_str("\n\
+            Kind=wireguard\n\n\
+            [WireGuard]\n\
+            ListenPort=51820\n\
+            PrivateKeyFile=/etc/systemd/network/keys/wg/");
+        self.add_key_file(&netdev.key)?;
+        self.push('\n');
+        for peer in netdev.peers.iter() {
+            self.push_str("\n# ");
+            self.push_str(&peer.name);
+            self.push_str("\n[WireGuardPeer]\nPublicKey=");
+            self.push_str(&peer.pubkey.base64_string());
+            if let Some(psk) = &peer.psk {
+                self.push_str("\nPresharedKeyFile=/etc/systemd/network/keys/wg/");
+                self.add_key_file(psk)?;
+            }
+            if ! peer.endpoint.is_empty() {
+                self.push_str("\nEndpoint=");
+                self.push_endpoint(&peer.endpoint)?
+            }
+            for allowed in peer.allowed.iter() {
+                self.push_str("\nAllowedIPs=");
+                self.push_str(&allowed);
+            }
+            if peer.keep {
+                self.push_str("\nPersistentKeepalive=25");
+            }
+            self.push('\n');
+        }
+        self.finish_config(&format!("{}.netdev", netdev.name))
+    }
+
+    fn fill_network(&mut self, config: &CompositeConfig) -> Result<()> {
+        let network = &config.network;
+        self.push_str("[Match]\nName=");
+        self.push_str(&config.iface);
+        self.push_str("\n\n[Network]\nAddress=");
+        self.push_str(&network.address);
+        self.push('/');
+        self.push_str(&format!("{}", &config.mask));
+        for route in network.routes.iter() {
+            self.push_str("\n\n[Route]\nDestination=");
+            self.push_str(route);
+            if ! route.contains(":") {
+                self.push_str("\nScope=link")
+            }
+        }
+        self.push('\n');
+        self.finish_config(&format!("{}.network", network.name))
+    }
+
     fn finish_config(&mut self, name: &str) -> Result<()> {
         let bytes = self.buffer.as_bytes();
         content_to_file(bytes, 
@@ -1289,15 +1354,52 @@ impl WriterBuffer {
         Ok(())
     }
 
+    fn fill_openwrt(&mut self, config: &CompositeConfig) -> Result<()> {
+        self.push_str("config interface '");
+        self.push_str(config.iface);
+        self.push_str("'\n\toption proto 'wireguard'\n\toption private_key '");
+        self.push_str(&config.netdev.key.pubkey().base64_string());
+        self.push_str("'\n\tlist addresses '");
+        self.push_str(config.network.address);
+        self.push('/');
+        self.push_str(&format!("{}", config.mask));
+        self.push_str("'\n\toption listen_port '51820'\n\toption delegate '0'\n");
+        for peer in config.netdev.peers.iter() {
+            self.push_str("\nconfig wireguard_");
+            self.push_str(config.iface);
+            self.push_str("\n\toption description '");
+            self.push_str(peer.name);
+            self.push_str("'\n\toption public_key '");
+            self.push_str(&peer.pubkey.base64_string());
+            if let Some(psk) = &peer.psk {
+                self.push_str("'\n\toption preshared_key '");
+                self.push_str(&psk.base64_string());
+            }
+            self.push_str("'\n\toption route_allowed_ips '1'\n\toption endpoint_host '");
+            self.push_str(peer.endpoint.host);
+            self.push_str("'\n\toption endpoint_port '");
+            self.push_str(&format!("{}", peer.endpoint.port));
+            for allowed in peer.allowed.iter() {
+                self.push_str("'\n\tlist allowed_ips '");
+                self.push_str(allowed);
+            }
+            self.push_str("'\n")
+        }
+        content_to_file(self.buffer.as_bytes(), &self.file_openwrt)?;
+        Ok(())
+    }
+
     fn finish_tar(&mut self) -> Result<()> {
         self.tar.finish()?;
         Ok(())
     }
 
+    #[inline(always)]
     fn push_str(&mut self, str: &str) {
         self.buffer.push_str(str)
     }
 
+    #[inline(always)]
     fn push(&mut self, char: char) {
         self.buffer.push(char)
     }
@@ -1306,6 +1408,7 @@ impl WriterBuffer {
         endpoint.push_to_string(&mut self.buffer)
     }
 
+    #[inline(always)]
     fn clear(&mut self) {
         self.buffer.clear()
     }
@@ -1337,59 +1440,13 @@ impl<'a> ConfigsToWrite<'a> {
         };
         for (name, config) in self.map.iter() {
             let mut buffer = WriterBuffer::new(&dir_configs, name, mtime)?;
-            let netdev = &config.netdev;
-            buffer.push_str("[NetDev]\nName=");
-            buffer.push_str(&config.iface);
-            buffer.push_str("\n\
-                Kind=wireguard\n\n\
-                [WireGuard]\n\
-                ListenPort=51820\n\
-                PrivateKeyFile=/etc/systemd/network/keys/wg/");
-            buffer.add_key_file(&netdev.key)?;
-            buffer.push('\n');
-            for peer in netdev.peers.iter() {
-                buffer.push_str("\n# ");
-                buffer.push_str(&peer.name);
-                buffer.push_str("\n[WireGuardPeer]\nPublicKey=");
-                buffer.push_str(&peer.pubkey.base64_string());
-                if let Some(psk) = &peer.psk {
-                    buffer.push_str("\nPresharedKeyFile=/etc/systemd/network/keys/wg/");
-                    buffer.add_key_file(psk)?;
-                }
-                if ! peer.endpoint.is_empty() {
-                    buffer.push_str("\nEndpoint=");
-                    buffer.push_endpoint(&peer.endpoint)?
-                }
-                for allowed in peer.allowed.iter() {
-                    buffer.push_str("\nAllowedIPs=");
-                    buffer.push_str(&allowed);
-                }
-                if peer.keep {
-                    buffer.push_str("\nPersistentKeepalive=25");
-                }
-                buffer.push('\n');
-            }
-            buffer.finish_config(&format!("{}.netdev", netdev.name))?;
+            buffer.fill_netdev(config)?;
             buffer.clear();
-            
-            let network = &config.network;
+            buffer.fill_network(config)?;
             buffer.clear();
-            buffer.push_str("[Match]\nName=");
-            buffer.push_str(&config.iface);
-            buffer.push_str("\n\n[Network]\nAddress=");
-            buffer.push_str(&network.address);
-            buffer.push('/');
-            buffer.push_str(&format!("{}", &config.mask));
-            for route in network.routes.iter() {
-                buffer.push_str("\n\n[Route]\nDestination=");
-                buffer.push_str(route);
-                if ! route.contains(":") {
-                    buffer.push_str("\nScope=link")
-                }
-            }
-            buffer.push('\n');
-            buffer.finish_config(&format!("{}.network", network.name))?;
             buffer.finish_tar()?;
+            buffer.clear();
+            buffer.fill_openwrt(config)?;
         }
         Ok(())
     }
