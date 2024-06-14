@@ -1,7 +1,9 @@
 # Wireguard deployer
 A tool to generate WireGuard configs and keys for `systemd-networkd` and `OpenWrt` and pack them into .tar with correct permissions and ownerships that are easily deployable (only for sd-networkd).
 
-Everything can be configured on a centralized host in a centralized config file, and almost any common network topologies are supported.
+Everything can be configured on a centralized host in a centralized config file, and almost any common network topologies are supported. 
+
+Check out my [blog post](https://7ji.github.io/networking/2024/06/14/complex-wireguard-setup-made-easy.html) about my complicated setup made easy with this tool, where I have systemd-networkd + OpenWrt mixed setup and connected two full-mesh networks via a single inter-node whose endpoint address is different based on the connection source, all of which couldn't be done with simple generators.
 
 ## Build
 
