@@ -347,8 +347,8 @@ struct PeerConfig {
     /// be used
     #[serde(default)]
     iface: String,
-    // /// The listening port, 
-    // port: Option<u16>,
+    /// The listening port, 
+    port: Option<u16>,
     /// The endpoint, i.e. the IP outside this network that other peers can 
     /// connect accordingly, usually a host + port pair
     #[serde(default)]
@@ -476,6 +476,8 @@ struct PeerConfigFlattened<'a> {
     network: &'a str,
     #[serde(skip_serializing_if = "str::is_empty")]
     iface: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
     #[serde(skip_serializing_if = "PeerEndpointConfigFlattened::is_empty")]
     endpoint: PeerEndpointConfigFlattened<'a>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -515,6 +517,7 @@ impl<'a> ConfigFlattened<'a> {
             netdev: &peer_config.netdev,
             network: &peer_config.network,
             iface: &peer_config.iface,
+            port: peer_config.port,
             endpoint: match &peer_config.endpoint {
                 PeerEndpointConfig::Plain(endpoint) => PeerEndpointConfigFlattened::Plain(endpoint.as_str()),
                 PeerEndpointConfig::Multi { parent, neighbor, child, map } => {
@@ -720,12 +723,13 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
         std::fmt::Write::write_fmt(buffer, format_args!("{}", self.port))?;
         Ok(())
     }
-    fn from_str_with_port_global(value: &'a str, port_global: u16) -> Self {
+
+    fn from_str_with_default_port(value: &'a str, default_port: u16) -> Self {
         match std::net::IpAddr::from_str(value) {
             Ok(r) => Self {
                 host: value,
                 v6: r.is_ipv6(),
-                port: port_global,
+                port: default_port,
             },
             Err(_) => 
                 // Only possible: domain(+port), v4+port, v6+port
@@ -735,7 +739,7 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
                             Ok(port) => port,
                             Err(_) => {
                                 host = value;
-                                port_global
+                                default_port
                             },
                         };
                         // Only possible: domain, v4, v6
@@ -758,7 +762,7 @@ impl<'a> NetDevPeerEndpointAddress<'a> {
                     None => Self {
                         host: value,
                         v6: false,
-                        port: port_global,
+                        port: default_port,
                     },
                 },
         }
@@ -1030,33 +1034,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
             iface: str_non_empty_or_global!(iface),
             netdev: NetDevConfig {
                 name: str_non_empty_or_global!(netdev),
-                port: match &peer_config.endpoint {
-                    PeerEndpointConfig::Plain(address) => 
-                        NetDevPeerEndpointAddress::from_str_with_port_global(
-                            address, config.port).port,
-                    PeerEndpointConfig::Multi { 
-                        parent, neighbor, child, 
-                        map 
-                    } => {
-                        let mut port_weights = BTreeMap::new();
-                        for (address, weight) in map.values().zip(std::iter::repeat(1)).chain([(parent, 2), (neighbor, 3), (child, 2)].into_iter()) {
-                            if address.is_empty() {
-                                continue
-                            }
-                            let port = NetDevPeerEndpointAddress::from_str_with_port_global(
-                                address, config.port).port;
-                            match port_weights.entry(port) {
-                                std::collections::btree_map::Entry::Occupied(mut total_weight) => *total_weight.get_mut() += weight,
-                                std::collections::btree_map::Entry::Vacant(total_weight) => {total_weight.insert(weight);},
-                            }
-                        }
-                        if let Some((port, _)) = port_weights.into_iter().max_by_key(|(_, weight)|*weight) {
-                            port
-                        } else {
-                            config.port
-                        }
-                    },
-                },
+                port: peer_config.port.unwrap_or(config.port),
                 key: self.get_key_or_new(dir_keys, peer_name)?.0.clone(),
                 peers: {
                     let mut peers = Vec::new();
@@ -1066,7 +1044,7 @@ impl<'a> ConfigsToWriteParsing<'a> {
                                 name: $peer_name,
                                 allowed: Default::default(),
                                 pubkey: self.get_key_or_new(dir_keys, $peer_name)?.1.clone(),
-                                endpoint: NetDevPeerEndpointAddress::from_str_with_port_global($peer_endpoint, config.port),
+                                endpoint: NetDevPeerEndpointAddress::from_str_with_default_port($peer_endpoint, $peer_config.port.unwrap_or(config.port)),
                                 psk: if config.psk {
                                     Some(self.get_psk_or_new(dir_keys, peer_name, $peer_name)?.clone())
                                 } else {

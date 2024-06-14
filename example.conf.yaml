@@ -16,6 +16,7 @@ port: 51820
 peers:
   siteA:
     ip: 192.168.66.2
+    port: 51832
     # An endpoint could be set with only host, in this case port from global would be used
     endpoint: 1111:2222::3333
     forward:
