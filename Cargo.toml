@@ -1,5 +1,5 @@
 [package]
-name = "sd-networkd-wg-deployer"
+name = "wireguard-deployer"
 version = "0.1.0"
 edition = "2021"
 

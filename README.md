@@ -1,5 +1,5 @@
-# Systemd-networkd wireguard deployer
-A tool to generate WireGuard configs and keys for systemd-networkd and pack them into .tar with correct permissions and ownerships that are easily deployable.
+# Wireguard deployer
+A tool to generate WireGuard configs and keys for `systemd-networkd` and `OpenWrt` and pack them into .tar with correct permissions and ownerships that are easily deployable (only for sd-networkd).
 
 Everything can be configured on a centralized host in a centralized config file, and almost any common network topologies are supported.
 
@@ -13,7 +13,7 @@ The ouput binary would be `target/release/sd-networkd-wg-deploy`
 
 ## Usage
 ```
-Usage: sd-networkd-wg-deployer [OPTIONS] <CONFIG> <DEPLOY>
+Usage: wireguard-deployer [OPTIONS] <CONFIG> <DEPLOY>
 
 Arguments:
   <CONFIG>  Path to .yaml config file
@@ -32,7 +32,7 @@ in which:
 
 e.g.:
 ```
-./sd-networkd-wg-deploy example.conf.yaml example.d
+./wireguard-deployer example.conf.yaml example.d
 ```
 
 The result to-be-deployed dir structure would be like this:
@@ -70,7 +70,7 @@ drwxr-x--- root/systemd-network 0 2024-06-10 12:59 keys/wg
 ```
 Consider plain folders as quick lookup reference. It's recommended to use the .tar files to actually deploy your configs and keys so you won't need to `chown` and `chmod` by yourself.
 
-You can deploy it however as you like. For a quick example, use the helper script to deploy the config to SSH remotes:
+You can deploy it however as you like. For a quick example, use the helper script to deploy the config to SSH remotes with systemd-networkd:
 ```
 ./script/deploy-to-ssh.sh example.d vmA vmB vmC hostA siteC:siteC.example.com ...
 ```
@@ -79,6 +79,7 @@ On a host where the tar file is already available (e.g. on current host), you ca
 sudo tar -C /etc/systemd/network -xvf example.d/configs/self.tar
 sudo systemctl restart systemd-networkd
 ```
+For OpenWrt, update `/etc/config/network` with the corresponding config.
 
 ## Config
 ### Format
@@ -366,7 +367,7 @@ A multi layer full mesh + star hybrid setup, where siteA + siteB + siteC + siteD
 [sd-networkd-wg-ddns](https://github.com/7Ji/sd-networkd-wg-ddns), systemd-networkd wireguard netdev endpoints DynDNS updater. Use it to actively monitor for wireguard peers with endpoints that're set up using domain name instead of plain IPs, and update them in case DNS record updated.
 
 ## License
-**sd-networkd-wg-deployer**, to generate easily deployable WireGuard configs and keys for systemd-networkd
+**wireguard-deployer**, WireGuard configs and keys generaor for systemd-networkd and OpenWrt 
 
 Copyright (C) 2024-present Guoxin "7Ji" Pu
 
