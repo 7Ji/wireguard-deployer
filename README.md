@@ -1,5 +1,5 @@
 # Wireguard deployer
-A tool to generate WireGuard configs and keys for `systemd-networkd` and `OpenWrt` and pack them into .tar with correct permissions and ownerships that are easily deployable (only for sd-networkd).
+A tool to generate WireGuard configs and keys for `systemd-networkd` and `OpenWrt` and pack them into .tar (only for sd-networkd) with correct permissions and ownerships that are easily deployable.
 
 Everything can be configured on a centralized host in a centralized config file, and almost any common network topologies are supported. 
 
@@ -107,6 +107,7 @@ In which, a `peer` map is defined as follows:
   forward: [list of IP ranges, optional, non-wireguard subnets this peer can forward wireguard traffic into]
   children: [map of peer, optional, peers using this peer as "router" to talk to the wireguard network]
   direct: [list of peer names, optional, selective peers in current layer that this peer is able to connect to directly, if not set then assuming all, if set to empty then none and only able to connect to parent (if existing) / children]
+  keep: [list of peer names, optional, selective peers in current layer that this peer connects to through NAT (the other end cannot connect directly to this peer)]
 ```
 In which, advanced endpoint definition is as follows:
 ```yaml
