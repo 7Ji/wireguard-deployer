@@ -1393,10 +1393,12 @@ impl WriterBuffer {
             if peer.has_external {
                 self.push_str("'\n\toption route_allowed_ips '1");
             }
-            self.push_str("'\n\toption endpoint_host '");
-            self.push_str(peer.endpoint.host);
-            self.push_str("'\n\toption endpoint_port '");
-            self.push_str(&format!("{}", peer.endpoint.port));
+            if !peer.endpoint.host.is_empty() {
+                self.push_str("'\n\toption endpoint_host '");
+                self.push_str(peer.endpoint.host);
+                self.push_str("'\n\toption endpoint_port '");
+                self.push_str(&format!("{}", peer.endpoint.port));
+            }
             if peer.keep {
                 self.push_str("'\n\toption persistent_keepalive '25");
             }
