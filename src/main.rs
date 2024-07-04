@@ -818,6 +818,8 @@ struct NetWorkConfig<'a> {
     name: &'a str,
     address: &'a str,
     routes: Vec<&'a str>,
+    forward4: bool,
+    forward6: bool,
 }
 
 /// A .netdev + .network config
@@ -1074,10 +1076,40 @@ impl<'a> ConfigsToWriteParsing<'a> {
                     peers
                 },
             },
-            network: NetWorkConfig {
-                name: str_non_empty_or_global!(network),
-                address: &peer_config.ip,
-                routes: Default::default(),
+            network: {
+                let mut forward4 = false;
+                let mut forward6 = false;
+                for forward in peer_config.forward.iter() {
+                    let ipaddr = match forward.rsplit_once('/') {
+                        Some((ipaddr, _)) => ipaddr,
+                        None => forward,
+                    };
+                    match (forward4, forward6) {
+                        (true, true) => break, // Should've broke already
+                        (true, false) => if std::net::Ipv6Addr::from_str(ipaddr).is_ok() {
+                            forward6 = true;
+                            break
+                        },
+                        (false, true) => if std::net::Ipv4Addr::from_str(ipaddr).is_ok() {
+                            forward4 = true;
+                            break;
+                        },
+                        (false, false) => {
+                            match std::net::IpAddr::from_str(ipaddr) {
+                                Ok(std::net::IpAddr::V4(_)) => forward4 = true,
+                                Ok(std::net::IpAddr::V6(_)) => forward6 = true,
+                                _ => (),
+                            }
+                        },
+                    }
+                }
+                NetWorkConfig {
+                    name: str_non_empty_or_global!(network),
+                    address: &peer_config.ip,
+                    routes: Default::default(),
+                    forward4,
+                    forward6
+                }
             },
         };
         self.route_targets.push(&peer_config.ip);
@@ -1347,6 +1379,13 @@ impl WriterBuffer {
         self.push_str(&network.address);
         self.push('/');
         self.push_str(&format!("{}", &config.mask));
+        if network.forward4 {
+            self.push_str("\nIPv4Forwarding=yes")
+        }
+        if network.forward6 {
+            self.push_str("\nIPv6Forwarding=yes")
+        }
+        self.push_str("\n\n[Link]\nRequiredForOnline=no");
         for route in network.routes.iter() {
             self.push_str("\n\n[Route]\nDestination=");
             self.push_str(route);
