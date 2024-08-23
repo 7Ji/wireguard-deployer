@@ -16,268 +16,16 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fmt::Display, fs::{create_dir_all, remove_dir_all, File}, io::{Read, Write}, path::{Path, PathBuf}, str::FromStr};
-use base64::Engine;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+mod error;
+mod io;
+mod wgkey;
 
-const LEN_CURVE25519_KEY_RAW: usize = 32;
-const LEN_CURVE25519_KEY_BASE64: usize = 44;
+use std::{cmp::Ordering, collections::{BTreeMap, HashMap}, fs::{remove_dir_all, File}, path::{Path, PathBuf}, str::FromStr};
+use io::{content_to_file, create_dir_all_checked, file_create_checked, file_open_checked, yaml_from_reader_checked};
+use serde::{Deserialize, Serialize};
+use wgkey::{WireGuardKey, WireGuardKeyBase64};
 
-#[derive(Debug)]
-enum Error {
-    Base64EncodeBufferTooSmall,
-    Base64LengthIncorrect {
-        expected: usize, actual: usize
-    },
-    Base64DecodeError (String),
-    Base64DecodeBufferTooSmall,
-    DuplicatedRoute,
-    FormatError (String),
-    ImpossibleLogic,
-    IoError (String),
-    YAMLError (String),
-}
-
-impl From<base64::EncodeSliceError> for Error {
-    fn from(_: base64::EncodeSliceError) -> Self {
-        Self::Base64EncodeBufferTooSmall
-    }
-}
-
-impl From<base64::DecodeSliceError> for Error {
-    fn from(value: base64::DecodeSliceError) -> Self {
-        match value {
-            base64::DecodeSliceError::DecodeError(e) => e.into(),
-            base64::DecodeSliceError::OutputSliceTooSmall => 
-                Self::Base64DecodeBufferTooSmall,
-        }
-    }
-}
-
-#[inline(always)]
-fn string_from_display<D: Display>(display: D) -> String {
-    format!("{}", display)
-}
-
-macro_rules! impl_from_error_display {
-    ($external: ty, $internal: ident) => {
-        impl From<$external> for Error {
-            fn from(value: $external) -> Self {
-                Self::$internal(string_from_display(value))
-            }
-        }
-    };
-}
-
-impl_from_error_display!(std::io::Error, IoError);
-impl_from_error_display!(serde_yaml::Error, YAMLError);
-impl_from_error_display!(base64::DecodeError, Base64DecodeError);
-impl_from_error_display!(std::fmt::Error, FormatError);
-// impl_from_error_display!(tar::)
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Base64EncodeBufferTooSmall => 
-                write!(f, "Base64 encode buffer too small"),
-            Error::Base64LengthIncorrect { expected, actual } => 
-                write!(f, "Base64 length incorrect, expected {}, actual {}",
-                    expected, actual),
-            Error::Base64DecodeError(e) => 
-                write!(f, "Base64 decode error: {}", e),
-            Error::Base64DecodeBufferTooSmall => 
-                write!(f, "Base64 decode buffer too small"),
-            Error::DuplicatedRoute =>
-                write!(f, "Duplicated route"),
-            Error::FormatError(e) =>
-                write!(f, "Format Error: {}", e),
-            Error::ImpossibleLogic => write!(f, "Impossible logic"),
-            Error::IoError(e) => write!(f, "IO Error: {}", e),
-            Error::YAMLError(e) => write!(f, "YAML Error: {}", e),
-        }
-    }
-}
-
-type Result<T> = std::result::Result<T, Error>;
-
-fn file_create_checked<P: AsRef<Path>>(path: P) -> Result<File> {
-    File::create(&path).map_err(|e|{
-        eprintln!("Failed to create file at '{}': {}", 
-                    path.as_ref().display(), e);
-        e.into()
-    })
-}
-
-fn write_all_checked<W: Write>(writer: &mut W, data: &[u8]) -> Result<()> {
-    writer.write_all(data).map_err(|e|{
-        eprintln!("Failed to write {} bytes to file: {}", data.len(), e);
-        e.into()
-    })
-}
-
-fn file_open_checked<P: AsRef<Path>>(path: P) -> Result<File> {
-    File::open(&path).map_err(|e|{
-        eprintln!("Failed to open file at '{}': {}", 
-                    path.as_ref().display(), e);
-        e.into()
-    })
-}
-
-fn read_exact_checked<R: Read>(reader: &mut R, data: &mut [u8]) -> Result<()> {
-    reader.read_exact(data).map_err(|e|{
-        eprintln!("Failed to read {} bytes from file: {}", data.len(), e);
-        e.into()
-    })
-}
-
-fn create_dir_all_checked<P: AsRef<Path>>(path: P) -> Result<()> {
-    create_dir_all(&path).map_err(|e|{
-        eprintln!("Failed to create dir '{}': {}", path.as_ref().display(), e);
-        e.into()
-    })
-}
-
-fn content_to_file<P: AsRef<Path>>(content: &[u8], path: P) -> Result<()> {
-    write_all_checked(&mut file_create_checked(path)?, content)
-}
-
-fn yaml_from_reader_checked<T, R>(reader: &mut R) -> Result<T> 
-where
-    T: DeserializeOwned,
-    R: Read
-{
-    serde_yaml::from_reader(reader).map_err(Into::into)
-}
-
-/// A raw WireGuard key, users shall not use this, but `WireGuardKey` instead
-type WireGuardKeyRaw = [u8; WireGuardKey::LEN_RAW];
-/// A base64-encoded WireGuard key
-type WireGuardKeyBase64 = [u8; WireGuardKey::LEN_BASE64];
-
-/// A WireGuard-compatible key, does not differentiate public or private by 
-/// itself, user should take care of that
-#[derive(Clone, Debug, Default)]
-struct WireGuardKey {
-    value: WireGuardKeyRaw
-}
-
-impl WireGuardKey {
-    /// The length of a WireGuard key, raw byte length
-    const LEN_RAW: usize = LEN_CURVE25519_KEY_RAW;
-    /// The length of a WireGuard key, base64 encoded length
-    const LEN_BASE64: usize = LEN_CURVE25519_KEY_BASE64;
-
-    /// The base64 engine we use, chars `0-9` `a-z` `A-Z` `/` `+`, with padding
-    const BASE64_ENGINE: base64::engine::GeneralPurpose 
-        = base64::engine::general_purpose::STANDARD;
-
-    fn new_empty_raw() -> WireGuardKeyRaw {
-        [0; Self::LEN_RAW]
-    }
-
-    fn new_empty_base64() -> WireGuardKeyBase64 {
-        [0; Self::LEN_BASE64]
-    }
-
-    /// Create a new random `WireGuardKey` with a `rand::Rng`-compatible 
-    /// generator
-    fn new_with_generator<G: rand::Rng>(mut generator: G) -> Self {
-        let mut value = Self::new_empty_raw();
-        generator.fill_bytes(&mut value);
-        Self { value }
-    }
-
-    /// Create a new random `WireGuardKey`, with a `rand::thread_rng()` random
-    /// generator
-    fn new() -> Self {
-        Self::new_with_generator(rand::thread_rng())
-    }
-
-    /// Encode this key to base64, note it is still raw bytes, users want a 
-    /// `String` shall call `base64_string()` instead
-    fn base64(&self) -> Result<WireGuardKeyBase64> {
-        let mut buffer = Self::new_empty_base64();
-        let size = Self::BASE64_ENGINE
-            .encode_slice(&self.value, &mut buffer)?;
-        if size == Self::LEN_BASE64 {
-            Ok(buffer)
-        } else {
-            Err(Error::Base64LengthIncorrect {
-                expected: Self::LEN_BASE64,
-                actual: size,
-            })
-        }
-    }
-
-    /// Encode this key to base64 string
-    fn base64_string(&self) -> String {
-        let mut value = String::new();
-        value.reserve_exact(Self::LEN_BASE64);
-        Self::BASE64_ENGINE.encode_string(self.value, &mut value);
-        value
-    }
-
-    /// Get the corresponding public key, assuming this is a private key.
-    /// 
-    /// As we don't differentiate on public key or private key, it's totally
-    /// legal to generate a public key of a public key, but that would be of
-    /// no use
-    fn pubkey(&self) -> Self {
-        let value = curve25519_dalek::EdwardsPoint::mul_base_clamped(
-            self.value).to_montgomery().to_bytes();
-        Self { value }
-    }
-
-    /// Write this key to file, without encoding
-    fn to_file_raw<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        write_all_checked(
-            &mut file_create_checked(path)?, &self.value)
-    }
-
-    /// Write this key to file, base64 encoded
-    fn to_file_base64<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let base64 = self.base64()?;
-        write_all_checked(&mut file_create_checked(path)?, &base64)
-    }
-
-    /// Read from file, in which a key is stored base64-encoded
-    fn from_file_base64<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let mut base64 = Self::new_empty_base64();
-        read_exact_checked(
-            &mut file_open_checked(path)?, &mut base64)?;
-        let mut value = Self::new_empty_raw();
-        Self::BASE64_ENGINE.decode_slice(&base64, &mut value)?;
-        Ok( Self { value } )
-    }
-
-    /// Read from file, in which a key is stored as raw un-encoded bytes
-    fn from_file_raw<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let mut value = Self::new_empty_raw();
-        read_exact_checked(
-            &mut file_open_checked(path)?, &mut value)?;
-        Ok( Self { value } )
-    }
-
-    /// Read from file if it exists, otherwise generate a new one
-    fn from_file_raw_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        if path.as_ref().exists() {
-            return Self::from_file_raw(path)
-        }
-        let key = Self::new();
-        key.to_file_raw(path)?;
-        Ok(key)
-    }
-
-    /// Read from file if it exists, otherwise generate a new one
-    fn from_file_base64_or_new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        if path.as_ref().exists() {
-            return Self::from_file_base64(path)
-        }
-        let key = Self::new();
-        key.to_file_base64(path)?;
-        Ok(key)
-    }
-}
+use crate::error::{Error, Result};
 
 type PeerList = BTreeMap<String, PeerConfig>;
 
@@ -1222,18 +970,19 @@ impl<'a> ConfigsToWriteParsing<'a> {
             self.map.iter_mut() 
         {
             for (route_target, route_info) in routes_info.routes.iter() {
-                if route_info.jump > 1 {
-                    if ! route_info.internal {
-                        composite_config.network.routes.push(route_target)
-                    }
-                    for netdev_peer in composite_config.netdev.peers.iter_mut() {
-                        if netdev_peer.name == route_info.via {
-                            if ! route_info.internal {
-                                netdev_peer.has_external = true;
-                            }
-                            netdev_peer.allowed.push(route_target);
-                            break
+                if route_info.jump <= 1 {
+                    continue
+                }
+                if ! route_info.internal {
+                    composite_config.network.routes.push(route_target)
+                }
+                for netdev_peer in composite_config.netdev.peers.iter_mut() {
+                    if netdev_peer.name == route_info.via {
+                        if ! route_info.internal {
+                            netdev_peer.has_external = true;
                         }
+                        netdev_peer.allowed.push(route_target);
+                        break
                     }
                 }
             }
