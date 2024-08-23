@@ -18,7 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod error;
 mod io;
-mod layered;
+mod layer;
 mod wgkey;
 
 use crate::error::{Error, Result};
@@ -26,8 +26,8 @@ use crate::error::{Error, Result};
 #[derive(Clone, Default, clap::ValueEnum)]
 enum Mode {
     #[default]
-    Layered,
-    OspfOverWireGuard,
+    Layer,
+    Ospf,
 }   
 
 #[derive(clap::Parser)]
@@ -59,7 +59,7 @@ pub(crate) struct Arguments {
 fn main() -> Result<()> {
     let args: Arguments = clap::Parser::parse();
     match args.mode {
-        Mode::Layered => layered::main(&args),
-        Mode::OspfOverWireGuard => todo!(),
+        Mode::Layer => layer::main(&args),
+        Mode::Ospf => todo!(),
     }
 }
