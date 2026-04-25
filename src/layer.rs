@@ -164,6 +164,13 @@ struct Config {
     /// but without actual port set
     #[serde(default = "default_port")]
     port: u16,
+    /// A peer name or IP address that shall be assigned as DNS for all peers
+    /// except itself
+    #[serde(default)]
+    dns: String,
+    /// The domains that shall be resolved through the `dns`
+    #[serde(default)]
+    domains: Vec<String>,
     /// The list of peers
     peers: PeerList,
 }
@@ -228,6 +235,10 @@ struct ConfigFlattened<'a> {
     iface: &'a str,
     #[serde(skip_serializing_if = "is_default_port")]
     port: u16,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    dns: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    domains: Vec<&'a str>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     peers: PeerListFlattened<'a>,
 }
@@ -367,7 +378,7 @@ impl<'a> ConfigFlattened<'a> {
 
 impl<'a> TryFrom<&'a Config> for ConfigFlattened<'a> {
     type Error = Error;
-    
+
     fn try_from(value: &'a Config) -> Result<Self> {
         let mut config_flattened = Self {
             psk: value.psk,
@@ -376,6 +387,8 @@ impl<'a> TryFrom<&'a Config> for ConfigFlattened<'a> {
             mask: value.mask,
             iface: &value.iface,
             port: value.port,
+            dns: &value.dns,
+            domains: value.domains.iter().map(|x|x.as_str()).collect(),
             peers: Default::default(),
         };
         config_flattened.add_peers(&value.peers, "");
@@ -538,6 +551,12 @@ struct NetDevConfig<'a> {
     peers: Vec<NetDevPeer<'a>>
 }
 
+#[derive(Debug, Default)]
+struct DnsDomains<'a> {
+    dns: &'a str,
+    domains: Vec<&'a str>,
+}
+
 /// A .network config
 #[derive(Debug, Default)]
 struct NetWorkConfig<'a> {
@@ -546,6 +565,7 @@ struct NetWorkConfig<'a> {
     routes: Vec<&'a str>,
     forward4: bool,
     forward6: bool,
+    dns_domains: Option<DnsDomains<'a>>,
 }
 
 /// A .netdev + .network config
@@ -708,14 +728,14 @@ impl<'a> RoutesInfo<'a> {
     }
 }
 
-
 #[derive(Debug, Default)]
 struct ConfigsToWriteParsing<'a> {
     map: BTreeMap<&'a str, (CompositeConfig<'a>, RoutesInfo<'a>)>,
     route_targets: Vec<&'a str>,
     keys: HashMap<&'a str, (NetDevKeyFile, WireGuardKey)>,
     psks: HashMap<(&'a str, &'a str), NetDevKeyFile>,
-    rawkey: bool
+    rawkey: bool,
+    // dns_domains: Option<DnsDomains<'a>>
 }
 
 impl<'a> ConfigsToWriteParsing<'a> {
@@ -834,7 +854,19 @@ impl<'a> ConfigsToWriteParsing<'a> {
                     address: &peer_config.ip,
                     routes: Default::default(),
                     forward4,
-                    forward6
+                    forward6,
+                    dns_domains:
+                        if config.dns.is_empty() ||
+                           config.dns == peer_config.ip
+                        {
+                            None
+                        } else {
+                            Some(DnsDomains {
+                                dns: &config.dns,
+                                domains: config.domains.iter()
+                                    .map(|x|x.as_str()).collect()
+                            })
+                        }
                 }
             },
         };
@@ -1111,6 +1143,21 @@ impl WriterBuffer {
         }
         if network.forward6 {
             self.push_str("\nIPv6Forwarding=yes")
+        }
+        if let Some(dns_domains) = &network.dns_domains {
+            self.push_str("\nDNS=");
+            self.push_str(dns_domains.dns);
+            self.push_str("\nDomains=");
+            let mut started = false;
+            for domain in dns_domains.domains.iter() {
+                if started {
+                    self.push(' ')
+                }
+                started = true;
+                self.push('~');
+                self.push_str(domain);
+            }
+            self.push_str("\nDNSDefaultRoute=no")
         }
         self.push_str("\n\n[Link]\nRequiredForOnline=no");
         for route in network.routes.iter() {
